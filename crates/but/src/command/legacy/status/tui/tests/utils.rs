@@ -247,6 +247,12 @@ impl TestTui {
         );
         self
     }
+
+    #[allow(dead_code)]
+    pub fn debug(mut self) -> ! {
+        let env = self.env.take().unwrap();
+        env.debug()
+    }
 }
 
 impl Drop for TestTui {
