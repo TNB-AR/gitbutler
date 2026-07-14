@@ -1752,6 +1752,25 @@ Error: Invalid file ID(s):
 }
 
 #[test]
+fn commit_does_not_needlessly_touch_file() -> anyhow::Result<()> {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("one-stack");
+    env.setup_metadata(&["A"]);
+
+    env.file("A", "new content");
+
+    let old_time = std::fs::metadata(env.projects_root().join("A"))?.modified()?;
+    env.but("commit -m test").assert().success();
+    let new_time = std::fs::metadata(env.projects_root().join("A"))?.modified()?;
+
+    assert_eq!(
+        new_time, old_time,
+        "time should be the same, because file should not have been modified"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn committing_to_existing_branch_with_same_name_as_file() {
     let env = Sandbox::init_scenario_with_target_and_default_settings("one-stack");
     env.setup_metadata(&["A"]);

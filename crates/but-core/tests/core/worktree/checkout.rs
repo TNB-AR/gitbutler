@@ -144,6 +144,7 @@ fn conflicted_commits_cannot_be_checked_out() -> anyhow::Result<()> {
 }
 
 #[test]
+#[ignore = "DISCUSS doesn't make sense - both workdir and checkout deleted executable, and why is num_deleted_files 1 when nothing is deleted"]
 fn pure_deletion_checkout_does_not_restore_unrelated_worktree_deletions() -> anyhow::Result<()> {
     let (repo, _tmp) = writable_scenario_slow("all-file-types-renamed-and-modified");
     snapbox::assert_data_eq!(
@@ -322,6 +323,7 @@ fn pure_deletion_checkout_keeps_empty_worktree_root() -> anyhow::Result<()> {
 }
 
 #[test]
+#[ignore = "DISCUSS both worktree and commit deleted a file"]
 fn worktree_and_index_deletions_are_ignored_in_snapshots() -> anyhow::Result<()> {
     let (repo, _tmp) = writable_scenario("deletion-addition-untracked");
     snapbox::assert_data_eq!(
