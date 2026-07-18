@@ -520,7 +520,7 @@ pub fn graph_to_ref_info(
 
     let (kind, stacks, target_ref, metadata) = (
         &workspace.kind,
-        &workspace.stacks,
+        workspace.display_stacks()?,
         &workspace.target_ref,
         &workspace.metadata,
     );

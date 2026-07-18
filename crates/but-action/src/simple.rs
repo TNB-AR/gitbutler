@@ -174,9 +174,10 @@ fn stacks_creating_if_none(
         |_| StackId::generate(),
         None,
     )?;
-    *ws = new_ws.into_owned();
-    let stack = ws
-        .stacks
+    // The display boundary: the context cache holds the pruned display workspace.
+    ws.adopt(new_ws);
+    let display_stacks = ws.display_stacks()?;
+    let stack = display_stacks
         .iter()
         .find(|stack| stack.ref_name() == Some(branch_name.as_ref()))
         .context("BUG: need to find stack that was just created")?;
@@ -194,7 +195,8 @@ fn stacks_creating_if_none(
 /// Stacks without an ID or reference name are skipped because the action needs both values to map
 /// assignments to a branch and report the resulting update.
 fn stack_info(ws: &but_graph::Workspace) -> Vec<StackForAction> {
-    ws.stacks
+    ws.display_stacks()
+        .expect("displayable")
         .iter()
         .filter_map(|stack| {
             let id = stack.id?;

@@ -121,4 +121,19 @@ impl<M: RefMetadata> Editor<'_, M> {
             inner: obj,
         })
     }
+
+    /// Write an empty merge-commit object carrying `message` — no parents yet; the
+    /// caller wires them. Authorship is kept (a merge synthesizes existing work).
+    /// The date mode is `CommitterKeepAuthorKeep`, not the `Update` that
+    /// [`Self::new_squashed_commit`] uses: the template here is a fresh
+    /// [`Self::empty_commit`] whose committer time is already now, whereas a squash
+    /// copies a stale existing commit and must refresh it.
+    pub fn new_merge_commit(
+        &self,
+        message: impl Into<gix::bstr::BString>,
+    ) -> Result<gix::ObjectId> {
+        let mut commit = self.empty_commit()?;
+        commit.message = message.into();
+        self.new_commit(commit, DateMode::CommitterKeepAuthorKeep)
+    }
 }

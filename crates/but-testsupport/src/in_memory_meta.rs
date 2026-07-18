@@ -275,5 +275,6 @@ fn stack_segment_from_partial_name(name: impl TryInto<PartialName>) -> Workspace
                 .unwrap()
         },
         archived: false,
+        parents: None,
     }
 }

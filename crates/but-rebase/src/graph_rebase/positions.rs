@@ -39,14 +39,21 @@ pub(crate) fn resolve_to_pick(
         EditorIndex::Pick(i) => PickIndex(i),
         entry @ EditorIndex::Ref(_) => graph.positioned_on(entry.as_ref()?)?,
     };
-    // Tombstones descend their preserved first edge.
-    for _ in 0..10_000 {
+    // Tombstones descend their preserved first edge. Like ref_depth, the bound guards the
+    // acyclic invariant — a broken invariant announces itself loudly in debug instead of
+    // returning a silent wrong answer.
+    let mut steps = 0usize;
+    loop {
         if graph.is_pick(node) {
             return Some(node);
         }
         node = *graph.parents(node).first()?;
+        steps += 1;
+        if steps >= 10_000 {
+            debug_assert!(false, "tombstone descent cycle resolving {node:?}");
+            return None;
+        }
     }
-    None
 }
 
 /// A pick's incoming edges as sorted `(child, parent number)` pairs. The groups on the pick
@@ -272,11 +279,8 @@ pub(crate) fn reposition_refs(
 ///
 /// Wired at editor creation AND at rebase entry, so every graph shape the suite produces —
 /// including post-mutation shapes — continuously validates the position model.
-pub(crate) fn debug_assert_positions_total(graph: &GraphEditor) {
-    if !cfg!(debug_assertions) {
-        return;
-    }
-    debug_assert_below_wellformed(graph);
+pub(crate) fn assert_positions_total(graph: &GraphEditor) -> anyhow::Result<()> {
+    assert_below_wellformed(graph)?;
     type OrderedPositionKey = (Option<PickIndex>, Vec<(PickIndex, usize)>, usize);
     let mut seen: std::collections::HashMap<OrderedPositionKey, RefIndex> = Default::default();
     for entry in graph.references().map(|(entry, _, _)| entry) {
@@ -291,19 +295,26 @@ pub(crate) fn debug_assert_positions_total(graph: &GraphEditor) {
         let pick = resolve_to_pick(graph, entry);
         let rank = ref_depth(graph, entry);
         if let Some(previous) = seen.insert((pick, entering.clone(), rank), entry) {
-            debug_assert!(
-                false,
-                "references {previous} and {entry} collide at position \
-                 (pick {pick:?}, entering {entering:?}, rank {rank})"
+            let name = |entry: RefIndex| match graph.reference(entry.into()) {
+                Some((refname, _)) => refname.to_string(),
+                None => format!("{:?}", graph.step_view(entry.into())),
+            };
+            let groups = pick.and_then(|p| graph.groups_at_for_debug(p));
+            anyhow::bail!(
+                "BUG: references {previous} ({}) and {entry} ({}) collide at position \
+                 (pick {pick:?}, entering {entering:?}, rank {rank})\ngroups: {groups:#?}",
+                name(previous),
+                name(entry)
             );
         }
     }
+    Ok(())
 }
 
 /// Every stored `below` of a LIVE reference names a positioned reference resolving to the SAME
 /// pick, and the below walk is acyclic. Tombstoned refs keep their stored position for
 /// retention reads but are spliced out of the physical stack, so only live refs are graded.
-fn debug_assert_below_wellformed(graph: &GraphEditor) {
+fn assert_below_wellformed(graph: &GraphEditor) -> anyhow::Result<()> {
     let name = |entry: RefIndex| match graph.reference(entry.into()) {
         Some((refname, _)) => refname.to_string(),
         None => format!("{:?}", graph.step_view(entry.into())),
@@ -317,25 +328,21 @@ fn debug_assert_below_wellformed(graph: &GraphEditor) {
         let mut cursor = graph.below_of(entry);
         while let Some(b) = cursor {
             if !graph.is_positioned(b) {
-                debug_assert!(
-                    false,
-                    "ref {entry}: below {b} is not a positioned reference"
-                );
-                return;
+                anyhow::bail!("BUG: ref {entry}: below {b} is not a positioned reference");
             }
-            debug_assert_eq!(
-                resolve_to_pick(graph, b),
-                pick,
-                "ref {entry} ({}): below {b} ({}) resolves to a different pick",
-                name(entry),
-                name(b)
-            );
+            if resolve_to_pick(graph, b) != pick {
+                anyhow::bail!(
+                    "BUG: ref {entry} ({}): below {b} ({}) resolves to a different pick",
+                    name(entry),
+                    name(b)
+                );
+            }
             depth += 1;
-            debug_assert!(depth <= 10_000, "ref {entry}: below walk cycle");
             if depth > 10_000 {
-                return;
+                anyhow::bail!("BUG: ref {entry}: below walk cycle");
             }
             cursor = graph.below_of(b);
         }
     }
+    Ok(())
 }

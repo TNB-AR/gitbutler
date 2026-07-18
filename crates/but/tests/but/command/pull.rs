@@ -716,6 +716,7 @@ fn setup_single_stack_metadata_at_target(
             .map(|branch_name| WorkspaceStackBranch {
                 ref_name: r(&format!("refs/heads/{branch_name}")).to_owned(),
                 archived: false,
+                parents: None,
             })
             .collect(),
         workspacecommit_relation: WorkspaceCommitRelation::Merged,

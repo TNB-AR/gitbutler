@@ -1,12 +1,13 @@
 //! Snapshot tests for the [`GraphWorkspace`] projection, covering the
 //! permutations of [`Editor::graph_workspace`]:
 //!
-//! - on the workspace branch with a workspace commit, split into one or more
-//!   stacks (with and without a target bounding them);
-//! - stacks that share ancestry and therefore collapse into a single stack;
+//! - on the workspace branch with a workspace commit, split into the DECLARED
+//!   stacks (with and without a target bounding them) — the partition comes from
+//!   the workspace's segment graph, so shared ancestry no longer collapses stacks;
 //! - pegged onto a non-workspace branch (one stack of everything), with and
 //!   without a target;
-//! - on the workspace branch but with no discoverable workspace commit.
+//! - on the workspace branch but with no discoverable workspace commit, and
+//!   metadata-less legacy shapes where the walk runs through the workspace ref.
 //!
 //! [`GraphWorkspace`]: but_rebase::graph_rebase::GraphWorkspace
 
@@ -22,23 +23,46 @@ use crate::utils::{fixture_writable, standard_options};
 /// Build an editor for `fixture` (optionally bounded by `target`, a revspec
 /// resolved against the repo) and render its [`Editor::graph_workspace`]
 /// projection. All borrows stay local so callers just snapshot the string.
-fn render(fixture: &str, target: Option<&str>) -> Result<String> {
+fn render(fixture: &str, target: Option<&str>, stacks: &[&[&str]]) -> Result<String> {
     let (repo, _tmp, mut meta) = fixture_writable(fixture)?;
 
-    let mut ws = Workspace::from_head(&repo, &*meta, ProjectMeta::default(), standard_options())?
-        .validated()?;
+    // The partition comes from DECLARED stacks; a fixture without declarations
+    // exercises the metadata-less legacy shapes.
+    if !stacks.is_empty() {
+        use but_core::RefMetadata as _;
+        let ws_ref: gix::refs::FullName = but_core::WORKSPACE_REF_NAME.try_into()?;
+        let mut ws_md = meta.workspace(ws_ref.as_ref())?;
+        for (idx, branches) in stacks.iter().enumerate() {
+            ws_md.stacks.push(but_core::ref_metadata::WorkspaceStack {
+                id: but_core::ref_metadata::StackId::from_number_for_testing(idx as u128 + 1),
+                branches: branches
+                    .iter()
+                    .map(|name| {
+                        Ok(but_core::ref_metadata::WorkspaceStackBranch {
+                            ref_name: format!("refs/heads/{name}").try_into()?,
+                            archived: false,
+                            parents: None,
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+                workspacecommit_relation: but_core::ref_metadata::WorkspaceCommitRelation::Merged,
+            });
+        }
+        meta.set_workspace(&ws_md)?;
+    }
 
-    // The projection bounds stacks at the target commit, so wire it onto the
-    // workspace graph that the editor reads from.
-    *ws.project_meta_mut() = ProjectMeta {
+    // The projection bounds stacks at the target commit; the partition must be built
+    // with the same target, so it goes into the build-time project meta.
+    let project_meta = ProjectMeta {
         target_commit_id: target
             .map(|t| repo.rev_parse_single(t).map(|id| id.detach()))
             .transpose()?,
         ..Default::default()
     };
+    let ws = Workspace::from_head(&repo, &*meta, project_meta, standard_options())?.validated()?;
     let editor = Editor::create(ws.commit_graph(), ws.project_meta(), &mut *meta, &repo)?;
 
-    editor.graph_workspace_ascii()
+    editor.graph_workspace_ascii(&ws.segment_graph)
 }
 
 /// A linear workspace (base→a→b→c under the workspace commit) with no target,
@@ -59,7 +83,7 @@ fn single_stack_no_target() -> Result<()> {
     );
 
     snapbox::assert_data_eq!(
-        render("workspace-signed", None)?,
+        render("workspace-signed", None, &[&["c", "b", "a", "base"]])?,
         snapbox::str![[r#"
 # Above workspace
 ◎  refs/heads/gitbutler/workspace
@@ -87,7 +111,11 @@ fn single_stack_no_target() -> Result<()> {
 #[test]
 fn single_stack_with_target() -> Result<()> {
     snapbox::assert_data_eq!(
-        render("workspace-signed", Some("base"))?,
+        render(
+            "workspace-signed",
+            Some("base"),
+            &[&["c", "b", "a", "base"]]
+        )?,
         snapbox::str![[r#"
 # Above workspace
 ◎  refs/heads/gitbutler/workspace
@@ -113,7 +141,7 @@ fn single_stack_with_target() -> Result<()> {
 /// is an ancestor of stack-1's tip). With no target they share ancestry, so the
 /// de-duplication merges them into a single stack.
 #[test]
-fn overlapping_stacks_merge_into_one() -> Result<()> {
+fn declared_stack_owns_overlapping_commits() -> Result<()> {
     let (repo, _tmp, _meta) = fixture_writable("workspace-with-empty-stack")?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
@@ -134,9 +162,16 @@ fn overlapping_stacks_merge_into_one() -> Result<()> {
     );
 
     snapbox::assert_data_eq!(
-        render("workspace-with-empty-stack", None)?,
+        render(
+            "workspace-with-empty-stack",
+            None,
+            &[&["stack-1"], &["stack-2"]]
+        )?,
         snapbox::str![[r#"
 # Above workspace
+●  f555940 Commit A
+●  d664be0 Commit B
+●  fafd9d0 init
 ◎  refs/heads/gitbutler/workspace
 
 # Workspace commit
@@ -146,10 +181,9 @@ fn overlapping_stacks_merge_into_one() -> Result<()> {
 ◎  refs/heads/stack-1
 ●  2169646 Commit D
 ●  46ef828 Commit C
+
+# Stack 1
 ◎  refs/heads/stack-2
-●  f555940 Commit A
-●  d664be0 Commit B
-●  fafd9d0 init
 "#]]
     );
     Ok(())
@@ -158,7 +192,7 @@ fn overlapping_stacks_merge_into_one() -> Result<()> {
 /// Three stacks that all point at the same base commit. They share that node,
 /// so they collapse into a single stack.
 #[test]
-fn three_stacks_same_base_collapse() -> Result<()> {
+fn three_empty_stacks_same_base_stay_declared() -> Result<()> {
     let (repo, _tmp, _meta) = fixture_writable("workspace-with-three-empty-stacks")?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
@@ -172,7 +206,11 @@ fn three_stacks_same_base_collapse() -> Result<()> {
     );
 
     snapbox::assert_data_eq!(
-        render("workspace-with-three-empty-stacks", None)?,
+        render(
+            "workspace-with-three-empty-stacks",
+            None,
+            &[&["stack-1"], &["stack-2"], &["stack-3"]]
+        )?,
         snapbox::str![[r#"
 # Above workspace
 ◎  refs/heads/gitbutler/workspace
@@ -182,7 +220,13 @@ fn three_stacks_same_base_collapse() -> Result<()> {
 
 # Stack 0
 ◎  refs/heads/stack-1
+●  fafd9d0 init
+
+# Stack 1
 ◎  refs/heads/stack-2
+●  fafd9d0 init
+
+# Stack 2
 ◎  refs/heads/stack-3
 ●  fafd9d0 init
 "#]]
@@ -216,7 +260,11 @@ fn divergent_stacks_sharing_excluded_base_stay_separate_with_target() -> Result<
     );
 
     snapbox::assert_data_eq!(
-        render("workspace-two-stacks", Some("main"))?,
+        render(
+            "workspace-two-stacks",
+            Some("main"),
+            &[&["stack-a"], &["stack-b"]]
+        )?,
         snapbox::str![[r#"
 # Above workspace
 ◎  refs/heads/gitbutler/workspace
@@ -228,11 +276,13 @@ fn divergent_stacks_sharing_excluded_base_stay_separate_with_target() -> Result<
 ◎  refs/heads/stack-a
 ●  49c06ff A2
 ●  ff76d2f A1
+◎  refs/heads/main
 
 # Stack 1
 ◎  refs/heads/stack-b
 ●  afc3f8f B2
 ●  b3ee99c B1
+◎  refs/heads/main
 "#]]
     );
     Ok(())
@@ -241,11 +291,12 @@ fn divergent_stacks_sharing_excluded_base_stay_separate_with_target() -> Result<
 /// The same divergent fixture with no target: both stacks reach `base`, share
 /// it (and the refs above it), and therefore merge into a single stack.
 #[test]
-fn divergent_stacks_sharing_base_merge() -> Result<()> {
+fn divergent_stacks_sharing_base_stay_separate() -> Result<()> {
     snapbox::assert_data_eq!(
-        render("workspace-two-stacks", None)?,
+        render("workspace-two-stacks", None, &[&["stack-a"], &["stack-b"]])?,
         snapbox::str![[r#"
 # Above workspace
+●  965998b base
 ◎  refs/heads/gitbutler/workspace
 
 # Workspace commit
@@ -255,12 +306,13 @@ fn divergent_stacks_sharing_base_merge() -> Result<()> {
 ◎  refs/heads/stack-a
 ●  49c06ff A2
 ●  ff76d2f A1
-│ ◎  refs/heads/stack-b
-│ ●  afc3f8f B2
-│ ●  b3ee99c B1
-├─╯
 ◎  refs/heads/main
-●  965998b base
+
+# Stack 1
+◎  refs/heads/stack-b
+●  afc3f8f B2
+●  b3ee99c B1
+◎  refs/heads/main
 "#]]
     );
     Ok(())
@@ -283,7 +335,7 @@ fn pegged_no_target() -> Result<()> {
     );
 
     snapbox::assert_data_eq!(
-        render("four-commits", None)?,
+        render("four-commits", None, &[])?,
         snapbox::str![[r#"
 # Above workspace
 (empty)
@@ -307,7 +359,7 @@ fn pegged_no_target() -> Result<()> {
 #[test]
 fn pegged_with_target() -> Result<()> {
     snapbox::assert_data_eq!(
-        render("four-commits", Some("main~3"))?,
+        render("four-commits", Some("main~3"), &[])?,
         snapbox::str![[r#"
 # Above workspace
 (empty)
@@ -320,6 +372,7 @@ fn pegged_with_target() -> Result<()> {
 ●  120e3a9 c
 ●  a96434e b
 ●  d591dfe a
+●  35b8235 base
 "#]]
     );
     Ok(())
@@ -347,25 +400,29 @@ fn disjoint_stacks_stay_separate() -> Result<()> {
     );
 
     snapbox::assert_data_eq!(
-        render("workspace-disjoint-stacks", None)?,
+        render(
+            "workspace-disjoint-stacks",
+            None,
+            &[&["stack-a"], &["stack-b"]]
+        )?,
         snapbox::str![[r#"
 # Above workspace
+●  49c06ff A2
+●  ff76d2f A1
+◎  refs/heads/main
+●  965998b base
 ◎  refs/heads/gitbutler/workspace
 
 # Workspace commit
 ●  f97c026 GitButler Workspace Commit
 
 # Stack 0
-◎  refs/heads/stack-a
-●  49c06ff A2
-●  ff76d2f A1
-◎  refs/heads/main
-●  965998b base
-
-# Stack 1
 ◎  refs/heads/stack-b
 ●  cb7021b B2
 ●  ce3278a B1
+
+# Stack 1
+◎  refs/heads/stack-a
 "#]]
     );
     Ok(())
@@ -379,7 +436,11 @@ fn disjoint_stacks_stay_separate() -> Result<()> {
 #[test]
 fn disjoint_stacks_stay_separate_with_target() -> Result<()> {
     snapbox::assert_data_eq!(
-        render("workspace-disjoint-stacks", Some("main"))?,
+        render(
+            "workspace-disjoint-stacks",
+            Some("main"),
+            &[&["stack-a"], &["stack-b"]]
+        )?,
         snapbox::str![[r#"
 # Above workspace
 ◎  refs/heads/gitbutler/workspace
@@ -391,6 +452,7 @@ fn disjoint_stacks_stay_separate_with_target() -> Result<()> {
 ◎  refs/heads/stack-a
 ●  49c06ff A2
 ●  ff76d2f A1
+◎  refs/heads/main
 
 # Stack 1
 ◎  refs/heads/stack-b
@@ -418,17 +480,22 @@ fn workspace_branch_without_managed_commit() -> Result<()> {
     );
 
     snapbox::assert_data_eq!(
-        render("workspace-without-managed-commit", None)?,
+        render("workspace-without-managed-commit", None, &[])?,
         snapbox::str![[r#"
 # Above workspace
-◎  refs/heads/gitbutler/workspace
-●  1b78c63 just a normal commit
-◎  refs/heads/main
-●  4d41a5c one
-●  965998b base
+(empty)
 
 # Workspace commit
 (empty)
+
+# Stack 0
+◎  refs/heads/gitbutler/workspace
+●  1b78c63 just a normal commit
+◎  refs/heads/main
+│ ◎  refs/remotes/origin/main (immutable)
+├─╯
+●  4d41a5c one
+●  965998b base
 "#]]
     );
     Ok(())

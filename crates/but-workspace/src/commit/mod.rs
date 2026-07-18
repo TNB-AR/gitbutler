@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use bstr::{BString, ByteSlice};
+use bstr::ByteSlice;
 use but_core::DiffSpec;
 use but_core::ref_metadata::MaybeDebug;
 
@@ -72,19 +72,20 @@ pub use squash_commits::{SquashCommitsOutcome, squash_commits};
 pub struct Stack {
     /// The tip of the top-most branch, i.e., the most recent commit that would become the parent of new commits of the topmost stack branch.
     pub tip: gix::ObjectId,
-    /// The short name of the stack, which is the name of the top-most branch,
-    /// like `main` or `feature/branch` or `origin/tracking-some-PR` or something entirely made up.
-    pub name: Option<BString>,
+    /// The tip branch's FULL ref name — shown (shortened) in the workspace commit
+    /// message, and recorded into the commit's parent binding header so the
+    /// projection reads intent instead of inferring.
+    pub ref_name: Option<gix::refs::FullName>,
 }
 
 impl std::fmt::Debug for Stack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Stack { tip, name } = self;
+        let Stack { tip, ref_name } = self;
         write!(
             f,
             "Stack {{ tip: {tip}, name: {name:?} }}",
             tip = tip.to_hex_with_len(7),
-            name = MaybeDebug(name)
+            name = MaybeDebug(&ref_name.as_ref().map(|rn| rn.shorten().to_owned()))
         )
     }
 }
@@ -181,36 +182,42 @@ pub mod merge {
             stacks: impl IntoIterator<Item = &'a but_core::ref_metadata::WorkspaceStack>,
             anon_stacks: impl IntoIterator<Item = (usize, Seed)>,
             workspace: &but_graph::Workspace,
-        ) -> ResolvedTips {
+        ) -> anyhow::Result<ResolvedTips> {
             let mut missing_stacks = Vec::new();
-            let mut tips_with_metadata_numbers: Vec<_> = stacks
+            // `None` entries (outside/missing stacks) still occupy their slot: the anonymous-tip
+            // insertion below is positional over this list.
+            let mut tips_with_metadata_numbers: Vec<Option<Seed>> = Vec::new();
+            for (top_segment, relation) in stacks
                 .into_iter()
                 .filter_map(|s| s.branches.first().map(|b| (b, s.workspacecommit_relation)))
-                .map(|(top_segment, relation)| {
-                    match relation {
-                        WorkspaceCommitRelation::Merged => {}
-                        WorkspaceCommitRelation::MergeFrom { .. } => {
-                            // These need to be part of the parents list, but shouldn't be merged.
-                            // If the caller wants to retry them, they can be passed here as "Merged".
-                            todo!(
-                                "this is a placeholder for where we will have to start handling this UnmergedTree"
-                            )
+            {
+                let seed = match relation {
+                    WorkspaceCommitRelation::Merged => {
+                        let stack_tip_name = top_segment.ref_name.as_ref();
+                        match workspace.commit_id_by_ref_name(stack_tip_name) {
+                            None => {
+                                missing_stacks.push(top_segment.ref_name.to_owned());
+                                None
+                            }
+                            Some(commit_id) => Some(Seed {
+                                name: Some(stack_tip_name.to_owned()),
+                                commit_id,
+                            }),
                         }
-                        WorkspaceCommitRelation::Outside => return None,
                     }
-                    let stack_tip_name = top_segment.ref_name.as_ref();
-                    match workspace.commit_id_by_ref_name(stack_tip_name) {
-                        None => {
-                            missing_stacks.push(top_segment.ref_name.to_owned());
-                            None
-                        }
-                        Some(commit_id) => Some(Seed {
-                            name: Some(stack_tip_name.to_owned()),
-                            commit_id,
-                        }),
+                    WorkspaceCommitRelation::MergeFrom { .. } => {
+                        // These would join the parents list without being merged; callers that
+                        // want them re-merged pass them as `Merged`. Nothing constructs this
+                        // relation yet, so error instead of building a wrong merge.
+                        anyhow::bail!(
+                            "Cannot build a workspace merge for '{}': its unmerged-tree (MergeFrom) relation is not supported yet",
+                            top_segment.ref_name
+                        );
                     }
-                })
-                .collect();
+                    WorkspaceCommitRelation::Outside => None,
+                };
+                tips_with_metadata_numbers.push(seed);
+            }
             let named_tips = tips_with_metadata_numbers
                 .iter()
                 .flatten()
@@ -226,40 +233,32 @@ pub mod merge {
                 tips_with_metadata_numbers
                     .insert(idx.min(tips_with_metadata_numbers.len()), Some(anon_tip));
             }
-            ResolvedTips {
+            Ok(ResolvedTips {
                 tips: tips_with_metadata_numbers.into_iter().flatten().collect(),
                 missing_stacks,
-            }
+            })
         }
 
         /// like [`Self::from_new_merge_with_metadata`], but supports tips, which makes it possible to re-merge anything
         /// even if the tip is unnamed.
         /// Note that [`missing_stacks`](Outcome::missing_stacks) is never set.
+        ///
+        /// ### Algorithm
+        ///
+        /// Fold the tips left to right into one tree, enforcing the lowest merge-base by carrying
+        /// the previous iteration's base forward. A conflicting tip is skipped; a conflicting HERO
+        /// tip instead skips its nearest merged predecessor and restarts, since the hero must land.
+        /// Once the hero merges after skips, [`schedule_merge_trials_after_hero`] re-arms the
+        /// not-yet-proven skips as trials, the fold restarts once more, and each trial is settled
+        /// by [`resolve_merge_trial`] — so only tips that truly conflict with the hero stay out.
+        /// [`conclude_tips_merge`] partitions the verdicts and writes the merge commit.
         pub fn from_new_merge_with_tips(
             tips: impl IntoIterator<Item = Seed>,
             workspace: &but_graph::Workspace,
             repo: &gix::Repository,
             hero_stack: Option<&gix::refs::FullNameRef>,
         ) -> anyhow::Result<Outcome> {
-            #[derive(Debug)]
-            enum Instruction {
-                Merge,
-                MergeTrial {
-                    hero_commit_id: gix::ObjectId,
-                    hero_tree_id: gix::ObjectId,
-                },
-                Skip,
-                CertainConflict,
-            }
             use Instruction as I;
-            impl Instruction {
-                fn should_skip(&self) -> bool {
-                    match self {
-                        I::Merge | I::MergeTrial { .. } => false,
-                        I::Skip | I::CertainConflict => true,
-                    }
-                }
-            }
             let mut tips: Vec<(Instruction, Seed)> =
                 tips.into_iter().map(|t| (I::Merge, t)).collect();
 
@@ -277,6 +276,7 @@ pub mod merge {
                         Seed {
                             name: ref_name,
                             commit_id,
+                            ..
                         },
                     ) = &mut tips[tip_idx];
                     let this_commit_id = *commit_id;
@@ -329,44 +329,11 @@ pub mod merge {
                                 continue 'tips_loop;
                             }
                         } else if is_hero {
-                            // Look back and see if there is any skipped stacks. If so, we now merged the hero branch successfully,
-                            //
-                            // This means that skipping some worked. Now we want to try to re-enable previously disabled ones to learn if they
-                            // were really at fault. Imagine `G1 X X X X X H` with H being hero and G1 being the good ones.
-                            // It's notable how multiple branches of these X can be good, but some in the middle can also be bad - imagine
-                            // one file being wrong in one, and another in another stack, so two stacks are causing conflicts while some
-                            // in between are not causing conflicts.
-                            // With this, we might find that it's actually `G1 X G2 G3 X G4 H`, and we don't unnecessarily unapply unrelated branches.
-                            // However, we only know that the first X is definitely a conflict, and all others we have to test one after another
-                            // by test-merging H right after the X under test.
-
-                            // First, mark the first X as conflict as we know it for sure.
-                            let mut saw_first_certain_conflict = false;
-                            let mut has_merge_trials = false;
-                            for (mode, _) in &mut tips[..tip_idx] {
-                                match mode {
-                                    I::Merge => continue,
-                                    I::MergeTrial { .. } => {
-                                        bail!(
-                                            "BUG: found a merge-trial, even though trial should be concluded by now"
-                                        )
-                                    }
-                                    I::CertainConflict => saw_first_certain_conflict = true,
-                                    I::Skip => {
-                                        if saw_first_certain_conflict {
-                                            *mode = I::MergeTrial {
-                                                hero_commit_id: this_commit_id,
-                                                hero_tree_id: this_tree_id,
-                                            };
-                                            has_merge_trials = true;
-                                        } else {
-                                            *mode = I::CertainConflict;
-                                            saw_first_certain_conflict = true;
-                                        }
-                                    }
-                                }
-                            }
-
+                            let has_merge_trials = schedule_merge_trials_after_hero(
+                                &mut tips[..tip_idx],
+                                this_commit_id,
+                                this_tree_id,
+                            )?;
                             if has_merge_trials {
                                 if ran_merge_trials_loop_safety {
                                     bail!(
@@ -382,28 +349,17 @@ pub mod merge {
                             hero_tree_id,
                         } = *mode
                         {
-                            // This stack merged cleanly, and now we have to merge the hero into that result to see if it works.
-                            // This tells us if this is stack merges cleanly or causes a real conflict in conjunction with hero.
-                            let base_tree_id = compute_merge_base(
+                            *mode = resolve_merge_trial(
                                 workspace,
                                 repo,
+                                &mut merge,
                                 base_commit_id,
                                 hero_commit_id,
-                            )?
-                            .0;
-                            let merge = repo.merge_trees(
-                                base_tree_id,
-                                merge.tree.write()?,
                                 hero_tree_id,
                                 labels_uninteresting_as_no_conflict_allowed,
-                                merge_options.clone(),
+                                &merge_options,
+                                conflict_kind,
                             )?;
-                            let trial_outcome = if merge.has_unresolved_conflicts(conflict_kind) {
-                                I::CertainConflict
-                            } else {
-                                I::Merge
-                            };
-                            *mode = trial_outcome;
                             if matches!(mode, I::CertainConflict) {
                                 // Now that we know it's actually a conflict, do not retain more state so
                                 // the conflicting one isn't recorded in the merge.
@@ -416,58 +372,7 @@ pub mod merge {
                     previous_tip = Some((this_tree_id, this_commit_id));
                 }
 
-                let (stacks, conflicting_stacks) = tips.iter().fold(
-                    (Vec::new(), Vec::new()),
-                    |(mut stacks, mut conflicting_stacks),
-                     (
-                        mode,
-                        Seed {
-                            name: ref_name,
-                            commit_id,
-                            ..
-                        },
-                    )| {
-                        if mode.should_skip() {
-                            conflicting_stacks.push(ConflictingStack {
-                                tip: *commit_id,
-                                ref_name: ref_name.clone(),
-                            });
-                        } else {
-                            stacks.push(Stack {
-                                tip: *commit_id,
-                                name: ref_name.as_ref().map(|rn| rn.shorten().to_owned()),
-                            });
-                        }
-                        (stacks, conflicting_stacks)
-                    },
-                );
-
-                if stacks.is_empty() {
-                    bail!(
-                        "BUG: Cannot merge nothing, no tips ended up in the graph: `conflicting_stacks` = {conflicting_stacks:?}, `tips` = : {tips:?}"
-                    )
-                }
-
-                let merge_tree_id = merge_tree_id
-                    .or({
-                        // Just one stack?
-                        previous_tip.map(|t| t.0)
-                    })
-                    .context("having stacks means the loop ran once")?;
-
-                // Finally, create the merge-commit itself.
-                let mut ws_commit =
-                    Self::new_from_stacks(stacks.iter().cloned(), repo.object_hash());
-                ws_commit.tree = merge_tree_id;
-                Self::fixup_times(&mut ws_commit, repo);
-
-                let workspace_commit_id = repo.write_object(&ws_commit)?.detach();
-                return Ok(Outcome {
-                    workspace_commit_id,
-                    stacks,
-                    missing_stacks: vec![], /* this is never set here as all tips are already resolved */
-                    conflicting_stacks,
-                });
+                return conclude_tips_merge(&tips, merge_tree_id, previous_tip, repo);
             }
         }
 
@@ -506,11 +411,168 @@ pub mod merge {
             let ResolvedTips {
                 tips,
                 missing_stacks,
-            } = Self::tips_from_metadata(stacks, anon_stacks, workspace);
+            } = Self::tips_from_metadata(stacks, anon_stacks, workspace)?;
             let mut out = Self::from_new_merge_with_tips(tips, workspace, repo, hero_stack)?;
             out.missing_stacks = missing_stacks;
             Ok(out)
         }
+    }
+
+    /// Per-tip verdict while folding the workspace merge in
+    /// [`WorkspaceCommit::from_new_merge_with_tips`].
+    #[derive(Debug)]
+    enum Instruction {
+        /// Merge this tip into the fold.
+        Merge,
+        /// A previously skipped tip re-armed for testing: merge it, then test-merge the hero on
+        /// top to learn whether it truly conflicts with the hero or was skipped by accident.
+        MergeTrial {
+            /// The hero's commit, the trial's other side.
+            hero_commit_id: gix::ObjectId,
+            /// The hero's tree, the trial's other side.
+            hero_tree_id: gix::ObjectId,
+        },
+        /// Leave this tip out of the fold (it conflicted, or is under suspicion).
+        Skip,
+        /// Proven to conflict — permanently out.
+        CertainConflict,
+    }
+
+    impl Instruction {
+        fn should_skip(&self) -> bool {
+            match self {
+                Instruction::Merge | Instruction::MergeTrial { .. } => false,
+                Instruction::Skip | Instruction::CertainConflict => true,
+            }
+        }
+    }
+
+    /// After the hero merged despite earlier skips, decide which skips were real conflicts:
+    /// the FIRST skip is a certain conflict (the hero conflicted right after it), every later
+    /// one becomes a [`Instruction::MergeTrial`] to be proven individually — imagine
+    /// `G1 X X X X X H`: only some of the X may truly conflict with `H`, and each is tested by
+    /// merging `H` right after it. Returns whether any trials were scheduled (the fold must
+    /// restart to run them).
+    fn schedule_merge_trials_after_hero(
+        tips_before_hero: &mut [(Instruction, Seed)],
+        hero_commit_id: gix::ObjectId,
+        hero_tree_id: gix::ObjectId,
+    ) -> anyhow::Result<bool> {
+        let mut saw_first_certain_conflict = false;
+        let mut has_merge_trials = false;
+        for (mode, _) in tips_before_hero {
+            match mode {
+                Instruction::Merge => continue,
+                Instruction::MergeTrial { .. } => {
+                    bail!("BUG: found a merge-trial, even though trial should be concluded by now")
+                }
+                Instruction::CertainConflict => saw_first_certain_conflict = true,
+                Instruction::Skip => {
+                    if saw_first_certain_conflict {
+                        *mode = Instruction::MergeTrial {
+                            hero_commit_id,
+                            hero_tree_id,
+                        };
+                        has_merge_trials = true;
+                    } else {
+                        *mode = Instruction::CertainConflict;
+                        saw_first_certain_conflict = true;
+                    }
+                }
+            }
+        }
+        Ok(has_merge_trials)
+    }
+
+    /// Settle one [`Instruction::MergeTrial`]: the tip under trial merged cleanly into the fold
+    /// (`merge`), so test-merge the hero on top of that result — a clean merge acquits the tip
+    /// ([`Instruction::Merge`]), a conflict convicts it ([`Instruction::CertainConflict`]).
+    #[expect(clippy::too_many_arguments)]
+    fn resolve_merge_trial(
+        workspace: &but_graph::Workspace,
+        repo: &gix::Repository,
+        merge: &mut gix::merge::tree::Outcome<'_>,
+        base_commit_id: gix::ObjectId,
+        hero_commit_id: gix::ObjectId,
+        hero_tree_id: gix::ObjectId,
+        labels: gix::merge::blob::builtin_driver::text::Labels<'_>,
+        merge_options: &gix::merge::tree::Options,
+        conflict_kind: gix::merge::tree::TreatAsUnresolved,
+    ) -> anyhow::Result<Instruction> {
+        let base_tree_id = compute_merge_base(workspace, repo, base_commit_id, hero_commit_id)?.0;
+        let trial = repo.merge_trees(
+            base_tree_id,
+            merge.tree.write()?,
+            hero_tree_id,
+            labels,
+            merge_options.clone(),
+        )?;
+        Ok(if trial.has_unresolved_conflicts(conflict_kind) {
+            Instruction::CertainConflict
+        } else {
+            Instruction::Merge
+        })
+    }
+
+    /// Conclude the fold: partition the tips by verdict into merged stacks and conflicting
+    /// stacks, then write the workspace merge commit over the folded tree.
+    fn conclude_tips_merge(
+        tips: &[(Instruction, Seed)],
+        merge_tree_id: Option<gix::ObjectId>,
+        previous_tip: Option<(gix::ObjectId, gix::ObjectId)>,
+        repo: &gix::Repository,
+    ) -> anyhow::Result<Outcome> {
+        let (stacks, conflicting_stacks) = tips.iter().fold(
+            (Vec::new(), Vec::new()),
+            |(mut stacks, mut conflicting_stacks),
+             (
+                mode,
+                Seed {
+                    name: ref_name,
+                    commit_id,
+                },
+            )| {
+                if mode.should_skip() {
+                    conflicting_stacks.push(ConflictingStack {
+                        tip: *commit_id,
+                        ref_name: ref_name.clone(),
+                    });
+                } else {
+                    stacks.push(Stack {
+                        tip: *commit_id,
+                        ref_name: ref_name.clone(),
+                    });
+                }
+                (stacks, conflicting_stacks)
+            },
+        );
+
+        if stacks.is_empty() {
+            bail!(
+                "BUG: Cannot merge nothing, no tips ended up in the graph: `conflicting_stacks` = {conflicting_stacks:?}, `tips` = : {tips:?}"
+            )
+        }
+
+        let merge_tree_id = merge_tree_id
+            .or({
+                // Just one stack?
+                previous_tip.map(|t| t.0)
+            })
+            .context("having stacks means the loop ran once")?;
+
+        // Finally, create the merge-commit itself.
+        let mut ws_commit =
+            WorkspaceCommit::new_from_stacks(stacks.iter().cloned(), repo.object_hash());
+        ws_commit.tree = merge_tree_id;
+        WorkspaceCommit::fixup_times(&mut ws_commit, repo);
+
+        let workspace_commit_id = repo.write_object(&ws_commit)?.detach();
+        Ok(Outcome {
+            workspace_commit_id,
+            stacks,
+            missing_stacks: vec![], /* this is never set here as all tips are already resolved */
+            conflicting_stacks,
+        })
     }
 
     fn compute_merge_base(
@@ -562,18 +624,19 @@ impl<'repo> WorkspaceCommit<'repo> {
         tree: gix::ObjectId,
     ) -> anyhow::Result<Self> {
         let stacks: Vec<_> = workspace
+            .segment_graph
             .stacks
             .iter()
             .map(|s| {
                 let name = s.ref_name().map(|rn| rn.shorten().to_owned());
                 let s = Stack {
-                    tip: s.tip_skip_empty().or(s.base()).with_context(|| {
+                    ref_name: s.ref_name().map(ToOwned::to_owned),
+                    tip: s.resting_commit().with_context(|| {
                         format!(
                             "Could not find any commit to serve as tip for stack {id:?} with name {name:?}",
                             id = s.id
                         )
                     })?,
-                    name,
                 };
                 anyhow::Ok(s)
             })
@@ -639,7 +702,7 @@ impl<'repo> WorkspaceCommit<'repo> {
         if !stacks.is_empty() {
             message.push_str("Here are the branches that are currently applied:\n");
             for branch in &stacks {
-                if let Some(name) = &branch.name {
+                if let Some(name) = branch.ref_name.as_ref().map(|rn| rn.shorten()) {
                     message.push_str(" - ");
                     message.push_str(name.to_str_lossy().as_ref());
                     message.push('\n');
@@ -655,6 +718,22 @@ impl<'repo> WorkspaceCommit<'repo> {
             .push_str("https://docs.gitbutler.com/features/branch-management/integration-branch\n");
 
         let author = commit_signature(commit_time("GIT_COMMITTER_DATE"));
+        // Record the parent↔stack binding when any stack is declared — the projection
+        // reads it instead of inferring the match. Unknowing callers (all ids `None`)
+        // stamp nothing, leaving inference in charge.
+        let extra_headers = if stacks.iter().any(|s| s.ref_name.is_some()) {
+            vec![(
+                but_core::commit::HEADERS_WORKSPACE_PARENTS_FIELD.into(),
+                but_core::commit::encode_workspace_parents(
+                    &stacks
+                        .iter()
+                        .map(|s| s.ref_name.clone())
+                        .collect::<Vec<_>>(),
+                ),
+            )]
+        } else {
+            vec![]
+        };
         gix::objs::Commit {
             tree: gix::ObjectId::empty_tree(object_hash),
             parents: stacks.iter().map(|s| s.tip).collect(),
@@ -662,7 +741,7 @@ impl<'repo> WorkspaceCommit<'repo> {
             author,
             encoding: Some("UTF-8".into()),
             message: message.into(),
-            extra_headers: vec![],
+            extra_headers,
         }
     }
 }

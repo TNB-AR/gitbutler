@@ -167,7 +167,8 @@ impl Snapshot {
             .filter(|workspace| workspace.kind.has_managed_commit())
             .map(|workspace| {
                 workspace
-                    .stacks
+                    .display_stacks()
+                    .unwrap_or_default()
                     .iter()
                     .flat_map(|stack| stack.segments.iter())
                     .filter_map(|segment| {
@@ -368,8 +369,8 @@ impl Snapshot {
             stack_id
         };
         let original_stack_ids: Vec<_> = self.content.branches.keys().copied().collect();
-        let ws_stacks_to_represent_in_vb_toml: Vec<_> = ws
-            .stacks
+        let ws_display_stacks = ws.display_stacks()?;
+        let ws_stacks_to_represent_in_vb_toml: Vec<_> = ws_display_stacks
             .iter()
             .enumerate()
             .map(|(idx, s)| {
@@ -1319,6 +1320,7 @@ impl VirtualBranchesTomlMetadata {
                                 WorkspaceStackBranch {
                                     ref_name,
                                     archived: sb.archived,
+                                    parents: None,
                                 }
                             })
                         })

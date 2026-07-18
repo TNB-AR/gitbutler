@@ -1,6 +1,8 @@
 use anyhow::Result;
 use but_graph::Workspace;
-use but_rebase::graph_rebase::{Editor, LookupStep, Step, selector, testing::Testing as _};
+use but_rebase::graph_rebase::{
+    Editor, LookupStep, Step, mutate::Reconnect, selector, testing::Testing as _,
+};
 use but_testsupport::visualize_commit_graph_all;
 use snapbox::prelude::*;
 
@@ -466,7 +468,7 @@ fn orders_commit_disconnected_from_checkout_roots_if_still_in_editor_graph() -> 
         },
         selector::SelectorSet::All,
         selector::SelectorSet::All,
-        true,
+        Reconnect::Skip,
     )?;
 
     let ordered = editor.order_commit_selectors_by_parentage([b])?;
@@ -544,7 +546,7 @@ fn orders_all_commits_in_y_shaped_two_branch_fixture() -> Result<()> {
         },
         selector::SelectorSet::All,
         selector::SelectorSet::None,
-        true,
+        Reconnect::Skip,
     )?;
 
     // The right reference should still exist, but its tip commit should no longer have commit children.

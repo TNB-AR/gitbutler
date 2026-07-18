@@ -132,10 +132,23 @@ fn build_graph_editor(
         }
     }
 
-    // Mutability follows reachability: the stored entrypoint reach, extended below by
-    // flooding from the extra mutable refs once the layout is ingested.
-    let mut mutable_commits: HashSet<gix::ObjectId> =
-        stored.reachable_commits.iter().copied().collect();
+    // Mutability follows reachability, but stops at the workspace lower bound: the
+    // entrypoint's reach runs all the way to the root, so seeding mutability from it alone
+    // would make the target's whole ancestry rewritable and drag the rebase into re-creating
+    // ancient merges (whose already-resolved parents then re-conflict). Commits strictly
+    // below the base — flagged BelowBound during reconciliation — are fixed anchors instead;
+    // the base itself and everything above it (including integrated tips like origin/main
+    // when they ARE the merge-base) stay editable, so operations can reorder around them.
+    // The set is later extended below by flooding from the extra mutable refs once ingested.
+    let mut mutable_commits: HashSet<gix::ObjectId> = stored
+        .reachable_commits
+        .iter()
+        .copied()
+        .filter(|id| {
+            !cg.node(*id)
+                .is_some_and(|n| n.flags.contains(but_graph::CommitFlags::BelowBound))
+        })
+        .collect();
 
     let mut step_graph = GraphEditor::adopt(arena);
     // Remote-category refs are never mutable — the editor cannot move or delete the remote.
@@ -276,7 +289,7 @@ fn build_graph_editor(
         })
         .collect();
 
-    crate::graph_rebase::positions::debug_assert_positions_total(&step_graph);
+    crate::graph_rebase::positions::assert_positions_total(&step_graph)?;
     Ok((step_graph, references, checkouts))
 }
 

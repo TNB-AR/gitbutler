@@ -636,6 +636,14 @@ impl GraphEditor {
 
     /// All positioned references — live AND dead — ascending by id.
     pub(crate) fn positioned_refs(&self) -> impl Iterator<Item = RefIndex> + '_ {
+        // O(R²): locate() is a linear scan run once per ref, and the mutation helpers that
+        // loop this are O(R²)–O(R³). Fine while R is human-scale; the tripwire makes the
+        // "R stays small" assumption (see locate) announce itself before it becomes a cliff.
+        debug_assert!(
+            self.refs.len() < 4096,
+            "positioned_refs is O(R²); R={} — de-linearize locate() before this scales",
+            self.refs.len()
+        );
         (0..self.refs.len())
             .map(RefIndex)
             .filter(|&entry| self.locate(entry).is_some())
@@ -643,6 +651,11 @@ impl GraphEditor {
 
     /// Where `entry` sits in the layout table: `(key, group index, member index)`.
     /// Membership is by NAME — the record's current name is the table identity.
+    /// Find a reference's position as `(pick, group, member index)`. THE HOT PRIMITIVE: a
+    /// linear scan of the whole layout, deliberately left linear — unlike the arena's
+    /// `children` index, which de-linearizes `incoming_edges` over thousands of commits —
+    /// because R, the refs in a workspace, is human-scale. If a workspace ever grows into
+    /// the hundreds of branches, this is the primitive to index.
     fn locate(&self, entry: RefIndex) -> Option<(PickIndex, usize, usize)> {
         let name = self.name_of(entry);
         self.layout.iter().find_map(|(&key, groups)| {
@@ -716,6 +729,7 @@ impl GraphEditor {
         carry: GroupCarry,
         attach: Option<RefIndex>,
     ) {
+        let carry = self.normalize_carry(key, carry);
         let name = self.name_of(entry).clone();
         let attach = attach.map(|b| self.name_of(b).clone());
         but_graph::ref_layout::place_in_groups(
@@ -726,10 +740,38 @@ impl GraphEditor {
         );
     }
 
+    /// An `Edges` carry naming the key's ENTIRE live edge set re-states as `All` — the same
+    /// normalization `classify` applies at authoring. Placement is the only door to the
+    /// table, so every live group holds a normalized carry and the twin-key rule in
+    /// [`but_graph::ref_layout::place_in_groups`] never misses a resolve-equal twin behind
+    /// a syntactically different statement.
+    fn normalize_carry(&self, key: PickIndex, carry: GroupCarry) -> GroupCarry {
+        let GroupCarry::Edges(edges) = &carry else {
+            return carry;
+        };
+        let live = match crate::graph_rebase::positions::resolve_to_pick(self, key) {
+            Some(pick) => crate::graph_rebase::positions::edges_into(self, pick),
+            None => return carry,
+        };
+        if !live.is_empty() && *edges == live {
+            GroupCarry::All
+        } else {
+            carry
+        }
+    }
+
     fn coalesce_groups(&mut self, key: PickIndex) {
         if let Some(groups) = self.layout.get_mut(&key) {
             but_graph::ref_layout::coalesce_groups(groups);
         }
+    }
+
+    /// The raw groups at `key`, for well-formedness failure reports.
+    pub(crate) fn groups_at_for_debug(
+        &self,
+        key: PickIndex,
+    ) -> Option<&Vec<but_graph::ref_layout::RefGroup<PickIndex>>> {
+        self.layout.get(&key)
     }
 
     fn set_ambiguous(&mut self, entry: RefIndex, ambiguous: bool) {

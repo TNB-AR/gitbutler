@@ -285,12 +285,20 @@ pub(super) fn advanced_outside_decisions<T: but_core::RefMetadata>(
         if pinned_commits.contains(&tip) {
             continue;
         }
-        // The branch's outside commits, down to where it rejoins the workspace.
+        // The branch's outside commits, down to where it rejoins the workspace — or an
+        // earlier decision's run: stack branches can sit on one another's spines
+        // (metadata lists them in any order), and each outside commit is materialized
+        // exactly once.
         let mut commits: Vec<usize> = Vec::new();
         let mut cursor = Some(tip);
         let mut rejoin = None;
         while let Some(id) = cursor {
-            if in_set.contains(&id) {
+            if in_set.contains(&id)
+                || outside_owned.contains(&id)
+                // A pinned commit (a stored/extra target position) starts its own segment
+                // via the extra-target region — the run stops above it.
+                || pinned_commits.contains(&id)
+            {
                 rejoin = Some(id);
                 break;
             }
@@ -304,7 +312,14 @@ pub(super) fn advanced_outside_decisions<T: but_core::RefMetadata>(
         };
         // Several stack branches can share the outside tip (e.g. an applied-branch preview where
         // `E` and `D` rest on the same not-yet-merged commit) — the run is materialized ONCE.
-        if outside_owned.contains(&tip) || !owner_of.contains_key(&rejoin) {
+        // A rejoin INTO an earlier outside run or onto a pinned commit has its owner by
+        // construction (the pinned one built later, wired via pending edges); an in-set
+        // rejoin must have one.
+        if outside_owned.contains(&tip)
+            || !(owner_of.contains_key(&rejoin)
+                || outside_owned.contains(&rejoin)
+                || pinned_commits.contains(&rejoin))
+        {
             continue;
         }
         // Named like any tip: ambiguous refs keep the segment anonymous (the walk's floating

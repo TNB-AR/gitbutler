@@ -62,6 +62,12 @@ pub(super) struct SegmentData {
     /// Passive refs the BUILD adds onto a commit (by arena handle) beyond what the arena
     /// carries — a float's displaced name. The position derivation merges them in.
     pub extra_refs: HashMap<usize, Vec<gix::refs::FullName>>,
+    /// Every DELIBERATE workspace parent the chain structure minted, `(insert position,
+    /// anchor commit)` in occurrence order — with these, the stored materialized parents
+    /// are fully determined: the real parent array with these woven in. The layout
+    /// derivation asserts exactly that, so segment wiring cannot corrupt the merge
+    /// silently.
+    pub minted_ws_parents: Vec<(usize, gix::ObjectId)>,
     /// The entrypoint's segment — the root of the layout's reach computation, and its name marks
     /// the HEAD ordinals.
     pub entrypoint_sidx: Option<usize>,
@@ -244,13 +250,31 @@ impl SegmentData {
     /// Every segment's outgoing edges as target ordinals in FINAL parent order: real parents by
     /// their index in the source commit's parent array, commit-less edges after them in edge
     /// order, ordinals compacted by push order.
+    /// The first commit `sidx` leads to, resolving through its empty chain — a fork or
+    /// dead end resolves to nothing.
+    fn first_commit_resolving_empties(
+        &self,
+        cg: &CommitGraph,
+        mut sidx: usize,
+    ) -> Option<gix::ObjectId> {
+        for _ in 0..self.segments.len() {
+            if let Some(&h) = self.segments[sidx].commits.first() {
+                return Some(cg.id_at(h));
+            }
+            let &[only] = self.segments[sidx].connections.as_slice() else {
+                return None;
+            };
+            sidx = only;
+        }
+        None
+    }
+
     pub(super) fn parent_ordered_targets(&self, cg: &CommitGraph) -> OrderedTargets {
         let mut start = Vec::with_capacity(self.segments.len() + 1);
         let mut flat = Vec::new();
-        let mut ordered: Vec<(usize, usize)> = Vec::new();
+        let mut ordered: Vec<(i64, usize, usize)> = Vec::new();
         start.push(0);
         for sidx in &self.segments {
-            let mut empty_branch_count = 0usize;
             ordered.clear();
             // An edge's endpoints derive from the segments' commits: the source's LAST
             // commit connects to the target's FIRST (a stored edge record would only
@@ -259,23 +283,53 @@ impl SegmentData {
                 .commits
                 .last()
                 .map(|&h| cg.node_at(h).parent_ids.as_slice());
+            let parent_number_of = |target: usize, taken: &[bool]| {
+                // A target routing a real parent keeps that parent's number — resolved
+                // through its empty chain, since a splice re-routes the edge through
+                // empties without moving it (first splicer wins a contested number).
+                let dst = self.first_commit_resolving_empties(cg, target)?;
+                edge_parents
+                    .and_then(|parents| parents.iter().position(|p| *p == dst))
+                    .filter(|&idx| !taken[idx])
+            };
+            let mut taken = vec![false; edge_parents.map_or(0, |p| p.len())];
+            // Direct commit-bearing targets claim their parent numbers ahead of empty-chain routes.
             for &target in &sidx.connections {
-                let dst_id = self.segments[target].commits.first().map(|&h| cg.id_at(h));
-                let real_parent_index = edge_parents
-                    .zip(dst_id)
-                    .and_then(|(parents, dst)| parents.iter().position(|p| *p == dst));
-                let ordinal = match real_parent_index {
-                    Some(idx) => idx,
-                    None => {
-                        let o = edge_parents.map_or(0, |p| p.len()) + empty_branch_count;
-                        empty_branch_count += 1;
-                        o
-                    }
-                };
-                ordered.push((ordinal, target));
+                if let Some(idx) = self.segments[target]
+                    .commits
+                    .first()
+                    .map(|&h| cg.id_at(h))
+                    .and_then(|dst| edge_parents.and_then(|p| p.iter().position(|x| *x == dst)))
+                {
+                    taken[idx] = true;
+                }
             }
-            ordered.sort_by_key(|(ordinal, _)| *ordinal);
-            flat.extend(ordered.iter().map(|&(_, t)| t));
+            // Targets with no real parent number (fresh minted parents, placed by insertion)
+            // stay WOVEN at their connection position: they sort right after the last
+            // numbered neighbor preceding them in connection order.
+            let mut prev_parent_number: i64 = -1;
+            let mut taken_by_route = vec![false; taken.len()];
+            for (ci, &target) in sidx.connections.iter().enumerate() {
+                let direct = self.segments[target]
+                    .commits
+                    .first()
+                    .map(|&h| cg.id_at(h))
+                    .and_then(|dst| edge_parents.and_then(|p| p.iter().position(|x| *x == dst)));
+                let parent_number = match direct {
+                    Some(idx) => Some(idx),
+                    None => parent_number_of(target, &taken)
+                        .filter(|&idx| !std::mem::replace(&mut taken_by_route[idx], true)),
+                };
+                match parent_number {
+                    Some(idx) => {
+                        prev_parent_number = idx as i64;
+                        ordered.push((idx as i64, ci, target));
+                    }
+                    None => ordered.push((prev_parent_number, ci, target)),
+                }
+            }
+            ordered.sort_by_key(|&(parent_number, ci, _)| (parent_number, ci));
+            flat.extend(ordered.iter().map(|&(_, _, t)| t));
             start.push(flat.len());
         }
         OrderedTargets { start, flat }
@@ -337,23 +391,25 @@ pub(super) fn build(inputs: GraphInputs<'_>) -> SegmentData {
         inputs.remote_tracking,
     );
     let before_chains = store.segments.len();
+    let mut pending_edges: Vec<(usize, gix::ObjectId)> = Vec::new();
     if inputs.stack_branches.is_some() || !inputs.layout.chains.is_empty() {
         build_chain_structure(
             inputs.cg,
             &mut store,
             &sidx_of_tip,
+            inputs.stack_branches,
             inputs.workspace_commit,
             inputs.ws_empty_ref,
             inputs.advanced_outside,
             inputs.layout,
             inputs.ad_hoc_chain_start,
             inputs.remote_tracking,
+            &mut pending_edges,
         );
     }
     // The coverage gates evaluate the PRE-CHAIN view: segments minted by the chain-structure
     // pass don't count as coverage.
     let chain_created: HashSet<usize> = (before_chains..store.segments.len()).collect();
-    let mut pending_edges: Vec<(usize, gix::ObjectId)> = Vec::new();
     add_remote_segments(
         inputs.cg,
         &mut store,
@@ -461,6 +517,7 @@ pub(super) fn build(inputs: GraphInputs<'_>) -> SegmentData {
         insert_empty_branches(
             inputs.cg,
             &mut store,
+            None,
             None,
             &inputs.layout.chains[inputs.ad_hoc_chain_start..],
             inputs.layout,
@@ -585,12 +642,14 @@ fn build_chain_structure(
     cg: &CommitGraph,
     store: &mut SegmentData,
     sidx_of_tip: &IdMap<usize>,
+    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
     workspace_commit: gix::ObjectId,
     ws_empty_ref: Option<&gix::refs::FullName>,
     advanced_outside: &[AdvancedOutside],
     layout: &LayoutPlan,
     ad_hoc_chain_start: usize,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    pending_edges: &mut Vec<(usize, gix::ObjectId)>,
 ) {
     let mut ws_empty_sidx = None;
     if let Some(ws_ref) = ws_empty_ref
@@ -602,28 +661,33 @@ fn build_chain_structure(
         ws_empty_sidx = Some(sidx);
     }
     for decision in advanced_outside {
-        let Some(owner) = store.sidx_by_commit(cg, decision.rejoin) else {
-            continue;
-        };
+        // A rejoin onto a PINNED commit has no owner yet — the extra-target region builds
+        // it later — so that edge waits in `pending_edges` like any late wiring.
+        let owner = store.sidx_by_commit(cg, decision.rejoin);
         let sidx = store.add_segment(decision.name.clone(), decision.commits.clone());
         if let Some(name) = decision.name.as_ref() {
             store.set_tip(sidx, decision.tip);
             store.segments[sidx].remote_tracking_ref_name = remote_tracking.get(name).cloned();
             // Only a NAMED advanced branch is the in-workspace segment's sibling; the workspace
             // position itself never links to outside content.
-            if decision.rejoin != workspace_commit
+            if let Some(owner) = owner
+                && decision.rejoin != workspace_commit
                 && store.segments[owner].sibling_segment_id.is_none()
             {
                 store.segments[owner].sibling_segment_id = Some(sidx);
             }
         }
-        store.connect(sidx, owner);
+        match owner {
+            Some(owner) => store.connect(sidx, owner),
+            None => pending_edges.push((sidx, decision.rejoin)),
+        }
     }
     let ws_sidx = ws_empty_sidx.or_else(|| sidx_of_tip.get(&workspace_commit).copied());
     insert_empty_branches(
         cg,
         store,
         ws_sidx,
+        stack_branches,
         &layout.chains[..ad_hoc_chain_start.min(layout.chains.len())],
         layout,
         remote_tracking,
@@ -637,6 +701,7 @@ fn insert_empty_branches(
     cg: &CommitGraph,
     store: &mut SegmentData,
     ws_sidx: Option<usize>,
+    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
     chains: &[RefChain],
     layout: &LayoutPlan,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
@@ -650,6 +715,18 @@ fn insert_empty_branches(
         store.segments[anchor].remote_tracking_branch_segment_id = None;
     }
     for (li, chain) in chains.iter().enumerate() {
+        // A chain with CONTENT anywhere (a member naming a commit-bearing segment, e.g.
+        // an advanced-outside run) lives with that content: its empties ride existing
+        // structure. A PURE-EMPTY chain is its own lane and needs a workspace parent.
+        let chain_has_content = stack_branches
+            .and_then(|branches| branches.get(li))
+            .is_some_and(|branches| {
+                branches.iter().any(|b| {
+                    store
+                        .sidx_by_ref(b)
+                        .is_some_and(|sidx| !store.segments[sidx].commits.is_empty())
+                })
+            });
         // Without a workspace anchor (the late ad-hoc pass), the chain hangs from its
         // own first anchor's segment — the pure ad-hoc shape.
         let mut from_sidx = ws_sidx.or_else(|| {
@@ -680,6 +757,30 @@ fn insert_empty_branches(
             } = &group.placement
                 && !members.is_empty()
             {
+                // The chain's own commit-bearing segments, as they stand NOW — a
+                // member named at mint or by an earlier anchor is a route the
+                // splice may interpose on.
+                let member_segments: HashSet<usize> = stack_branches
+                    .and_then(|branches| branches.get(li))
+                    .map(|branches| {
+                        branches
+                            .iter()
+                            .filter_map(|b| store.sidx_by_ref(b))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let hang = if from_sidx == ws_sidx {
+                    SpliceHang::Workspace {
+                        position: li,
+                        anchor_commit: commit,
+                        anchor_in_ws: cg
+                            .node(commit)
+                            .is_some_and(|n| n.flags.contains(crate::CommitFlags::InWorkspace)),
+                        members: chain_has_content.then_some(&member_segments),
+                    }
+                } else {
+                    SpliceHang::Thread
+                };
                 insert_empty_chain_above(
                     store,
                     from_sidx,
@@ -687,7 +788,7 @@ fn insert_empty_branches(
                     members,
                     remote_tracking,
                     *into_owning_chain,
-                    (from_sidx == ws_sidx).then_some(li),
+                    hang,
                 );
             }
             from_sidx = Some(anchor);
@@ -695,9 +796,53 @@ fn insert_empty_branches(
     }
 }
 
-/// Splice a run of empty named segments in above `anchor`: incoming edges redirect to the top
-/// empty (or a fresh edge from `from_sidx` joins it), and the bottom empty connects down.
-#[allow(clippy::too_many_arguments)]
+/// How a splice reaches its anchor when the chain's thread has no edge there yet.
+enum SpliceHang<'a> {
+    /// The chain hangs from the WORKSPACE — this is its first placed anchor.
+    Workspace {
+        /// The chain's metadata index: where a fresh workspace parent inserts.
+        position: usize,
+        /// The anchor commit — recorded when a fresh parent is minted.
+        anchor_commit: gix::ObjectId,
+        /// Whether the anchor commit is workspace territory. A fresh parent is never
+        /// minted beyond it — an empty resting on an unpulled target tip must not
+        /// drag that territory into the materialized merge.
+        anchor_in_ws: bool,
+        /// The chain's member segments when the chain has CONTENT anywhere — routes
+        /// its empties ride. `None` for a pure-empty chain, which never rides:
+        /// its fresh workspace parent IS what makes an empty stack its own lane (and
+        /// the stored surplus parents drive its projection claim).
+        members: Option<&'a HashSet<usize>>,
+    },
+    /// The chain's thread continues from its previous anchor's segment.
+    Thread,
+}
+
+/// A segment (other than the thread itself) carrying an edge into `anchor` that the
+/// splice may re-route, per `eligible`.
+fn route_into_anchor(
+    store: &SegmentData,
+    thread: usize,
+    anchor: usize,
+    eligible: impl Fn(usize, &Segment) -> bool,
+) -> Option<usize> {
+    (0..store.segments.len()).find(|&sidx| {
+        sidx != thread
+            && !store.is_remote_segment(sidx)
+            && eligible(sidx, &store.segments[sidx])
+            && store.segments[sidx].connections.contains(&anchor)
+    })
+}
+
+/// Splice a run of empty named segments in above `anchor`, per THE PLACEMENT RULE:
+/// a splice rides the first existing route into its anchor owned by its chain — the
+/// thread from the chain's previous anchor (or the workspace itself, redirected in
+/// place), a member's own segment, or an unowned anonymous lane (the run the
+/// projection claims for the chain whose branch rests on its parent). Only a chain
+/// owning no route creates an edge: a fresh workspace parent onto a workspace-interior
+/// anchor when hanging from the workspace (the empty-stack lane), or a plain
+/// connection when continuing its thread. `into_owning_chain` is the plan's stronger
+/// grant — the splice owns the anchor outright, so ANY edge into it re-routes.
 fn insert_empty_chain_above(
     store: &mut SegmentData,
     from_sidx: Option<usize>,
@@ -705,7 +850,7 @@ fn insert_empty_chain_above(
     empties: &[gix::refs::FullName],
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
     into_owning_chain: bool,
-    fresh_connection_position: Option<usize>,
+    hang: SpliceHang<'_>,
 ) {
     let ids: Vec<usize> = empties
         .iter()
@@ -719,7 +864,8 @@ fn insert_empty_chain_above(
         return;
     };
     if let Some(from_sidx) = from_sidx {
-        let mut redirected = false;
+        // The thread's own edges into the anchor re-route in place (the owning-chain
+        // grant widens this to every edge).
         let redirect_sources: Vec<usize> = if into_owning_chain {
             (0..store.segments.len())
                 .filter(|&sidx| !ids.contains(&sidx) && !store.is_remote_segment(sidx))
@@ -727,29 +873,46 @@ fn insert_empty_chain_above(
         } else {
             vec![from_sidx]
         };
+        let mut redirected = false;
         for source in redirect_sources {
             redirected |= store.retarget_edges(source, anchor, top) > 0;
         }
         if !redirected {
-            let find_parent = |require_commits: bool| {
-                (0..store.segments.len()).find(|&sidx| {
-                    sidx != from_sidx
-                        && !store.is_remote_segment(sidx)
-                        && (!require_commits || !store.segments[sidx].commits.is_empty())
-                        && store.segments[sidx].connections.contains(&anchor)
+            let route = if into_owning_chain {
+                // Plan-granted ownership: adopt any parent, commit-bearing first.
+                route_into_anchor(store, from_sidx, anchor, |_, seg| !seg.commits.is_empty())
+                    .or_else(|| route_into_anchor(store, from_sidx, anchor, |_, _| true))
+            } else if let SpliceHang::Workspace {
+                anchor_in_ws: true,
+                members: Some(members),
+                ..
+            } = hang
+            {
+                // A content chain rides its own member's segment or an unowned lane.
+                route_into_anchor(store, from_sidx, anchor, |sidx, seg| {
+                    (seg.name.is_none() || members.contains(&sidx)) && !seg.commits.is_empty()
                 })
+            } else {
+                None
             };
-            let chain_parent = into_owning_chain
-                .then(|| find_parent(true).or_else(|| find_parent(false)))
-                .flatten();
-            match chain_parent {
-                Some(parent) => {
-                    store.retarget_edges(parent, anchor, top);
+            match (route, hang) {
+                (Some(route), _) => {
+                    store.retarget_edges(route, anchor, top);
                 }
-                None => match fresh_connection_position {
-                    Some(parent_number) => store.insert_connect_at(from_sidx, parent_number, top),
-                    None => store.connect(from_sidx, top),
-                },
+                (
+                    None,
+                    SpliceHang::Workspace {
+                        position,
+                        anchor_commit,
+                        anchor_in_ws: true,
+                        ..
+                    },
+                ) => {
+                    store.minted_ws_parents.push((position, anchor_commit));
+                    store.insert_connect_at(from_sidx, position, top)
+                }
+                (None, SpliceHang::Workspace { .. }) => {}
+                (None, SpliceHang::Thread) => store.connect(from_sidx, top),
             }
         }
     }
@@ -778,6 +941,15 @@ fn cover_explicit_seeds(
     for t in cg.seeds.iter().filter(|_| cg.explicit_seeds) {
         if cg.node(t.id).is_none() {
             continue;
+        }
+        if std::env::var("DBG_COVER").is_ok() {
+            eprintln!(
+                "DBG cover: seed {:?}@{} covered={:?} excluding={:?}",
+                t.ref_name.as_ref().map(|n| n.shorten().to_string()),
+                t.id,
+                store.sidx_by_commit(cg, t.id),
+                store.sidx_by_commit_excluding(cg, t.id, chain_created),
+            );
         }
         match store.sidx_by_commit_excluding(cg, t.id, chain_created) {
             None => segment_ahead_region(

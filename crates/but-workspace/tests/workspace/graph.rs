@@ -32,6 +32,7 @@ use crate::ref_info::with_workspace_commit::utils::{
 fn detailed(
     fixture: &str,
     target: Option<&str>,
+    stacks: &[&[&str]],
 ) -> Result<(gix::Repository, DetailedGraphWorkspace)> {
     let repo = crate::utils::read_only_in_memory_scenario(fixture)?;
     let mut meta = VirtualBranchesTomlMetadata::from_path(
@@ -39,6 +40,29 @@ fn detailed(
             .join(".git")
             .join("should-never-be-written.toml"),
     )?;
+    // The partition comes from DECLARED stacks; a fixture without declarations
+    // exercises the metadata-less legacy shapes.
+    if !stacks.is_empty() {
+        let ws_ref: gix::refs::FullName = but_core::WORKSPACE_REF_NAME.try_into()?;
+        let mut ws_md = meta.workspace(ws_ref.as_ref())?;
+        for (idx, branches) in stacks.iter().enumerate() {
+            ws_md.stacks.push(but_core::ref_metadata::WorkspaceStack {
+                id: but_core::ref_metadata::StackId::from_number_for_testing(idx as u128 + 1),
+                branches: branches
+                    .iter()
+                    .map(|name| {
+                        Ok(but_core::ref_metadata::WorkspaceStackBranch {
+                            ref_name: format!("refs/heads/{name}").try_into()?,
+                            archived: false,
+                            parents: None,
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+                workspacecommit_relation: but_core::ref_metadata::WorkspaceCommitRelation::Merged,
+            });
+        }
+        meta.set_workspace(&ws_md)?;
+    }
     let project_meta = ProjectMeta {
         target_ref: target.map(gix::refs::FullName::try_from).transpose()?,
         // Bound the graph at the target commit too, so the projection is
@@ -356,7 +380,7 @@ fn row_glyph_label(data: &GraphRowData) -> (&'static str, String) {
 /// the single stack reaches all the way down to `base`.
 #[test]
 fn single_stack_no_target() -> Result<()> {
-    let (repo, detailed) = detailed("workspace-linear", None)?;
+    let (repo, detailed) = detailed("workspace-linear", None, &[&["c", "b", "a", "base"]])?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
@@ -399,7 +423,11 @@ fn single_stack_no_target() -> Result<()> {
 /// The same linear workspace bounded by a target at `base`.
 #[test]
 fn single_stack_with_target() -> Result<()> {
-    let (_repo, detailed) = detailed("workspace-linear", Some("refs/heads/base"))?;
+    let (_repo, detailed) = detailed(
+        "workspace-linear",
+        Some("refs/heads/base"),
+        &[&["c", "b", "a", "base"]],
+    )?;
     snapbox::assert_data_eq!(
         render(&detailed),
         snapbox::str![[r#"
@@ -431,7 +459,11 @@ fn single_stack_with_target() -> Result<()> {
 /// they share ancestry, so de-duplication merges them into a single stack.
 #[test]
 fn overlapping_stacks_merge_into_one() -> Result<()> {
-    let (repo, detailed) = detailed("workspace-with-empty-stack", None)?;
+    let (repo, detailed) = detailed(
+        "workspace-with-empty-stack",
+        None,
+        &[&["stack-1"], &["stack-2"]],
+    )?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
@@ -456,14 +488,13 @@ fn overlapping_stacks_merge_into_one() -> Result<()> {
 ◎  0 refs/heads/stack-1
 ●  1 2169646 Commit D
 ●  2 46ef828 Commit C
-◎  3 refs/heads/stack-2
-●  4 f555940 Commit A
-●  5 d664be0 Commit B
-●  6 fafd9d0 init
   linear    ref=0  rows=[0, 1, 2]
-  linear    ref=3  rows=[3, 4, 5, 6]
   reference ref=0  rows=[0, 1, 2]
-  reference ref=3  rows=[3, 4, 5, 6]
+
+# Stack 1
+◎  0 refs/heads/stack-2
+  linear    ref=0  rows=[0]
+  reference ref=0  rows=[0]
 "#]]
     );
     Ok(())
@@ -472,7 +503,11 @@ fn overlapping_stacks_merge_into_one() -> Result<()> {
 /// Three stacks that all point at the same base commit collapse into one stack.
 #[test]
 fn three_stacks_same_base_collapse() -> Result<()> {
-    let (repo, detailed) = detailed("workspace-with-three-empty-stacks", None)?;
+    let (repo, detailed) = detailed(
+        "workspace-with-three-empty-stacks",
+        None,
+        &[&["stack-1"], &["stack-2"], &["stack-3"]],
+    )?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
@@ -488,15 +523,21 @@ fn three_stacks_same_base_collapse() -> Result<()> {
         snapbox::str![[r#"
 # Stack 0
 ◎  0 refs/heads/stack-1
-◎  1 refs/heads/stack-2
-◎  2 refs/heads/stack-3
-●  3 fafd9d0 init
-  linear    ref=0  rows=[0]
-  linear    ref=1  rows=[1]
-  linear    ref=2  rows=[2, 3]
-  reference ref=0  rows=[0]
-  reference ref=1  rows=[1]
-  reference ref=2  rows=[2, 3]
+●  1 fafd9d0 init
+  linear    ref=0  rows=[0, 1]
+  reference ref=0  rows=[0, 1]
+
+# Stack 1
+◎  0 refs/heads/stack-2
+●  1 fafd9d0 init
+  linear    ref=0  rows=[0, 1]
+  reference ref=0  rows=[0, 1]
+
+# Stack 2
+◎  0 refs/heads/stack-3
+●  1 fafd9d0 init
+  linear    ref=0  rows=[0, 1]
+  reference ref=0  rows=[0, 1]
 "#]]
     );
     Ok(())
@@ -507,7 +548,7 @@ fn three_stacks_same_base_collapse() -> Result<()> {
 /// computes exclusive reachability.
 #[test]
 fn divergent_stacks_sharing_base_merge() -> Result<()> {
-    let (repo, detailed) = detailed("workspace-two-stacks", None)?;
+    let (repo, detailed) = detailed("workspace-two-stacks", None, &[&["stack-a"], &["stack-b"]])?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
@@ -530,18 +571,21 @@ fn divergent_stacks_sharing_base_merge() -> Result<()> {
 ◎  0 refs/heads/stack-a
 ●  1 49c06ff A2
 ●  2 ff76d2f A1
-│ ◎  3 refs/heads/stack-b
-│ ●  4 afc3f8f B2
-│ ●  5 b3ee99c B1
-├─╯
-◎  6 refs/heads/main
-●  7 965998b base
+◎  3 refs/heads/main
   linear    ref=0  rows=[0, 1, 2]
-  linear    ref=3  rows=[3, 4, 5]
-  linear    ref=6  rows=[6, 7]
+  linear    ref=3  rows=[3]
   reference ref=0  rows=[0, 1, 2]
-  reference ref=3  rows=[3, 4, 5]
-  reference ref=6  rows=[6, 7]
+  reference ref=3  rows=[3]
+
+# Stack 1
+◎  0 refs/heads/stack-b
+●  1 afc3f8f B2
+●  2 b3ee99c B1
+◎  3 refs/heads/main
+  linear    ref=0  rows=[0, 1, 2]
+  linear    ref=3  rows=[3]
+  reference ref=0  rows=[0, 1, 2]
+  reference ref=3  rows=[3]
 "#]]
     );
     Ok(())
@@ -551,7 +595,11 @@ fn divergent_stacks_sharing_base_merge() -> Result<()> {
 /// `base`).
 #[test]
 fn divergent_stacks_sharing_excluded_base_stay_separate_with_target() -> Result<()> {
-    let (_repo, detailed) = detailed("workspace-two-stacks", Some("refs/heads/main"))?;
+    let (_repo, detailed) = detailed(
+        "workspace-two-stacks",
+        Some("refs/heads/main"),
+        &[&["stack-a"], &["stack-b"]],
+    )?;
     snapbox::assert_data_eq!(
         render(&detailed),
         snapbox::str![[r#"
@@ -559,15 +607,21 @@ fn divergent_stacks_sharing_excluded_base_stay_separate_with_target() -> Result<
 ◎  0 refs/heads/stack-a
 ●  1 49c06ff A2
 ●  2 ff76d2f A1
+◎  3 refs/heads/main
   linear    ref=0  rows=[0, 1, 2]
+  linear    ref=3  rows=[3]
   reference ref=0  rows=[0, 1, 2]
+  reference ref=3  rows=[3]
 
 # Stack 1
 ◎  0 refs/heads/stack-b
 ●  1 afc3f8f B2
 ●  2 b3ee99c B1
+◎  3 refs/heads/main
   linear    ref=0  rows=[0, 1, 2]
+  linear    ref=3  rows=[3]
   reference ref=0  rows=[0, 1, 2]
+  reference ref=3  rows=[3]
 "#]]
     );
     Ok(())
@@ -577,7 +631,7 @@ fn divergent_stacks_sharing_excluded_base_stay_separate_with_target() -> Result<
 /// lands in one stack.
 #[test]
 fn pegged_no_target() -> Result<()> {
-    let (repo, detailed) = detailed("four-commits", None)?;
+    let (repo, detailed) = detailed("four-commits", None, &[])?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
@@ -607,7 +661,11 @@ fn pegged_no_target() -> Result<()> {
 /// Two stacks with no shared history stay genuinely separate.
 #[test]
 fn disjoint_stacks_stay_separate() -> Result<()> {
-    let (repo, detailed) = detailed("workspace-disjoint-stacks", None)?;
+    let (repo, detailed) = detailed(
+        "workspace-disjoint-stacks",
+        None,
+        &[&["stack-a"], &["stack-b"]],
+    )?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
@@ -626,22 +684,16 @@ fn disjoint_stacks_stay_separate() -> Result<()> {
         render(&detailed),
         snapbox::str![[r#"
 # Stack 0
-◎  0 refs/heads/stack-a
-●  1 49c06ff A2
-●  2 ff76d2f A1
-◎  3 refs/heads/main
-●  4 965998b base
-  linear    ref=0  rows=[0, 1, 2]
-  linear    ref=3  rows=[3, 4]
-  reference ref=0  rows=[0, 1, 2]
-  reference ref=3  rows=[3, 4]
-
-# Stack 1
 ◎  0 refs/heads/stack-b
 ●  1 cb7021b B2
 ●  2 ce3278a B1
   linear    ref=0  rows=[0, 1, 2]
   reference ref=0  rows=[0, 1, 2]
+
+# Stack 1
+◎  0 refs/heads/stack-a
+  linear    ref=0  rows=[0]
+  reference ref=0  rows=[0]
 "#]]
     );
     Ok(())
@@ -650,7 +702,11 @@ fn disjoint_stacks_stay_separate() -> Result<()> {
 /// The same disjoint stacks, bounded by a target at `main`.
 #[test]
 fn disjoint_stacks_stay_separate_with_target() -> Result<()> {
-    let (_repo, detailed) = detailed("workspace-disjoint-stacks", Some("refs/heads/main"))?;
+    let (_repo, detailed) = detailed(
+        "workspace-disjoint-stacks",
+        Some("refs/heads/main"),
+        &[&["stack-a"], &["stack-b"]],
+    )?;
     snapbox::assert_data_eq!(
         render(&detailed),
         snapbox::str![[r#"
@@ -658,8 +714,11 @@ fn disjoint_stacks_stay_separate_with_target() -> Result<()> {
 ◎  0 refs/heads/stack-a
 ●  1 49c06ff A2
 ●  2 ff76d2f A1
+◎  3 refs/heads/main
   linear    ref=0  rows=[0, 1, 2]
+  linear    ref=3  rows=[3]
   reference ref=0  rows=[0, 1, 2]
+  reference ref=3  rows=[3]
 
 # Stack 1
 ◎  0 refs/heads/stack-b
@@ -678,7 +737,11 @@ fn disjoint_stacks_stay_separate_with_target() -> Result<()> {
 /// `reference_segment` spans multiple commits within one linear stack.
 #[test]
 fn stacked_dependent_branches_partition_per_reference() -> Result<()> {
-    let (repo, detailed) = detailed("workspace-stacked-branches", None)?;
+    let (repo, detailed) = detailed(
+        "workspace-stacked-branches",
+        None,
+        &[&["branch-top", "branch-bottom"]],
+    )?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
@@ -718,7 +781,11 @@ fn stacked_dependent_branches_partition_per_reference() -> Result<()> {
 /// reference segment becomes header-only while the branch segments are intact.
 #[test]
 fn stacked_dependent_branches_with_target() -> Result<()> {
-    let (_repo, detailed) = detailed("workspace-stacked-branches", Some("refs/heads/main"))?;
+    let (_repo, detailed) = detailed(
+        "workspace-stacked-branches",
+        Some("refs/heads/main"),
+        &[&["branch-top", "branch-bottom"]],
+    )?;
     snapbox::assert_data_eq!(
         render(&detailed),
         snapbox::str![[r#"
@@ -729,10 +796,13 @@ fn stacked_dependent_branches_with_target() -> Result<()> {
 ◎  3 refs/heads/branch-bottom
 ●  4 d27b21f bottom 2
 ●  5 a3a5a44 bottom 1
+◎  6 refs/heads/main
   linear    ref=0  rows=[0, 1, 2]
   linear    ref=3  rows=[3, 4, 5]
+  linear    ref=6  rows=[6]
   reference ref=0  rows=[0, 1, 2]
   reference ref=3  rows=[3, 4, 5]
+  reference ref=6  rows=[6]
 "#]]
     );
     Ok(())
@@ -744,7 +814,7 @@ fn stacked_dependent_branches_with_target() -> Result<()> {
 /// `main` belongs to `main`.
 #[test]
 fn non_linear_reference_segment_with_internal_merge() -> Result<()> {
-    let (repo, detailed) = detailed("workspace-merge-in-stack", None)?;
+    let (repo, detailed) = detailed("workspace-merge-in-stack", None, &[&["feature"]])?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
@@ -764,19 +834,14 @@ fn non_linear_reference_segment_with_internal_merge() -> Result<()> {
         snapbox::str![[r#"
 # Stack 0
 ◎  0 refs/heads/feature
-●    1 d585e46 M
-├─╮
-● │  2 6339d5b P
-│ ●  3 ed2a973 Q
-├─╯
-◎  4 refs/heads/main
-●  5 965998b base
-  linear    ref=0  rows=[0]
-  linear    ref=-  rows=[1]
-  linear    ref=-  rows=[2, 3]
-  linear    ref=4  rows=[4, 5]
-  reference ref=0  rows=[0, 1, 2, 3]
-  reference ref=4  rows=[4, 5]
+●  1 d585e46 M
+●  2 6339d5b P
+◎  3 refs/heads/main
+●  4 965998b base
+  linear    ref=0  rows=[0, 1, 2]
+  linear    ref=3  rows=[3, 4]
+  reference ref=0  rows=[0, 1, 2]
+  reference ref=3  rows=[3, 4]
 "#]]
     );
     Ok(())
@@ -787,7 +852,11 @@ fn non_linear_reference_segment_with_internal_merge() -> Result<()> {
 /// `stack-y`, so it is included in *both* of their reference segments.
 #[test]
 fn shared_commit_belongs_to_both_reference_segments() -> Result<()> {
-    let (repo, detailed) = detailed("workspace-shared-commit", None)?;
+    let (repo, detailed) = detailed(
+        "workspace-shared-commit",
+        None,
+        &[&["stack-x"], &["stack-y"]],
+    )?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
@@ -808,19 +877,14 @@ fn shared_commit_belongs_to_both_reference_segments() -> Result<()> {
 # Stack 0
 ◎  0 refs/heads/stack-x
 ●  1 9f0269c X1
-│ ◎  2 refs/heads/stack-y
-│ ●  3 e6d5410 Y1
-├─╯
-●  4 d2bff94 S
-◎  5 refs/heads/main
-●  6 965998b base
   linear    ref=0  rows=[0, 1]
-  linear    ref=2  rows=[2, 3]
-  linear    ref=-  rows=[4]
-  linear    ref=5  rows=[5, 6]
-  reference ref=0  rows=[0, 1, 4]
-  reference ref=2  rows=[2, 3, 4]
-  reference ref=5  rows=[5, 6]
+  reference ref=0  rows=[0, 1]
+
+# Stack 1
+◎  0 refs/heads/stack-y
+●  1 e6d5410 Y1
+  linear    ref=0  rows=[0, 1]
+  reference ref=0  rows=[0, 1]
 "#]]
     );
     Ok(())
@@ -837,14 +901,20 @@ fn shared_commit_belongs_to_both_reference_segments() -> Result<()> {
 /// this metadata-free projection harness intentionally does not set up.
 #[test]
 fn push_status_nothing_to_push_and_unpushed() -> Result<()> {
-    let (_repo, detailed) = detailed("workspace-two-stacks", Some("refs/heads/main"))?;
+    let (_repo, detailed) = detailed(
+        "workspace-two-stacks",
+        Some("refs/heads/main"),
+        &[&["stack-a"], &["stack-b"]],
+    )?;
     snapbox::assert_data_eq!(
         render_push_status(&detailed),
         snapbox::str![[r#"
 # Stack 0
 refs/heads/stack-a push=CompletelyUnpushed             combined=CompletelyUnpushed             remote=-
+refs/heads/main push=NothingToPush                  combined=NothingToPush                  remote=refs/remotes/origin/main
 # Stack 1
 refs/heads/stack-b push=CompletelyUnpushed             combined=CompletelyUnpushed             remote=-
+refs/heads/main push=NothingToPush                  combined=NothingToPush                  remote=refs/remotes/origin/main
 "#]]
     );
     Ok(())
@@ -879,8 +949,10 @@ fn integration_status_marks_fully_integrated_branch() -> Result<()> {
         snapbox::str![[r#"
 # Stack 0
 refs/heads/A   push=Integrated                     combined=Integrated                     remote=-
+refs/heads/main push=UnpushedCommitsRequiringForce  combined=UnpushedCommitsRequiringForce  remote=refs/remotes/origin/main
 # Stack 1
 refs/heads/B   push=CompletelyUnpushed             combined=UnpushedCommitsRequiringForce  remote=-
+refs/heads/main push=UnpushedCommitsRequiringForce  combined=UnpushedCommitsRequiringForce  remote=refs/remotes/origin/main
 "#]]
     );
     // `add A1` (== origin/main) is integrated; `add B1` is local-only.
@@ -920,7 +992,6 @@ fn commit_state_marks_content_integrated_commits() -> Result<()> {
 a6588cf E        state=local
 4827d2f C        state=local
 3d3bfa7 B        state=integrated
-d8d0970 D        state=local
 f5b02d3 A        state=integrated
 "#]]
     );
@@ -947,7 +1018,6 @@ fn commit_state_marks_historically_integrated_commits() -> Result<()> {
 972cf74 E        state=local
 9e74c75 C        state=local
 ffb801b B        state=integrated
-d6a7004 D        state=local
 448b195 A        state=integrated
 "#]]
     );
@@ -975,8 +1045,10 @@ fn integration_status_marks_partially_integrated_multi_branch_stack() -> Result<
 # Stack 0
 refs/heads/A   push=CompletelyUnpushed             combined=UnpushedCommitsRequiringForce  remote=-
 refs/heads/C   push=Integrated                     combined=Integrated                     remote=-
+refs/heads/main push=UnpushedCommitsRequiringForce  combined=UnpushedCommitsRequiringForce  remote=refs/remotes/origin/main
 # Stack 1
 refs/heads/B   push=CompletelyUnpushed             combined=UnpushedCommitsRequiringForce  remote=-
+refs/heads/main push=UnpushedCommitsRequiringForce  combined=UnpushedCommitsRequiringForce  remote=refs/remotes/origin/main
 
 # Stack 0
 44c9428 add A1   state=local
@@ -1008,8 +1080,10 @@ fn integration_status_marks_fully_integrated_multi_branch_stack() -> Result<()> 
 # Stack 0
 refs/heads/A   push=Integrated                     combined=Integrated                     remote=-
 refs/heads/C   push=Integrated                     combined=Integrated                     remote=-
+refs/heads/main push=UnpushedCommitsRequiringForce  combined=UnpushedCommitsRequiringForce  remote=refs/remotes/origin/main
 # Stack 1
 refs/heads/B   push=CompletelyUnpushed             combined=UnpushedCommitsRequiringForce  remote=-
+refs/heads/main push=UnpushedCommitsRequiringForce  combined=UnpushedCommitsRequiringForce  remote=refs/remotes/origin/main
 
 # Stack 0
 44c9428 add A1   state=integrated
@@ -1177,7 +1251,7 @@ d5d3a92 unique local tip state=local
 /// workspace commit: no stacks are produced.
 #[test]
 fn workspace_branch_without_managed_commit() -> Result<()> {
-    let (repo, detailed) = detailed("workspace-without-managed-commit", None)?;
+    let (repo, detailed) = detailed("workspace-without-managed-commit", None, &[])?;
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
@@ -1187,6 +1261,20 @@ fn workspace_branch_without_managed_commit() -> Result<()> {
 
 "#]]
     );
-    snapbox::assert_data_eq!(render(&detailed), snapbox::str!["(no stacks)"]);
+    snapbox::assert_data_eq!(
+        render(&detailed),
+        snapbox::str![[r#"
+# Stack 0
+◎  0 refs/heads/gitbutler/workspace
+●  1 1b78c63 just a normal commit
+◎  2 refs/heads/main
+●  3 4d41a5c one
+●  4 965998b base
+  linear    ref=0  rows=[0, 1]
+  linear    ref=2  rows=[2, 3, 4]
+  reference ref=0  rows=[0, 1]
+  reference ref=2  rows=[2, 3, 4]
+"#]]
+    );
     Ok(())
 }

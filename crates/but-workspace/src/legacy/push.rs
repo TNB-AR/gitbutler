@@ -90,7 +90,7 @@ pub fn workspace_branch_and_ancestors_push(
             continue;
         }
 
-        let Some(local_sha) = ws.branch_resting_commit_id(ref_name) else {
+        let Some(local_sha) = ws.branch_resting_commit_id_in_display(ref_name) else {
             continue;
         };
 

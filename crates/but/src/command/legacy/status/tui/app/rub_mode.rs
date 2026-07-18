@@ -303,8 +303,11 @@ impl App {
 
         let stack_id = {
             let (_guard, _, ws, _) = ctx.workspace_and_db()?;
-            ws.find_commit_and_containers(*commit_id)
-                .and_then(|(stack, _, _)| stack.id)
+            but_graph::workspace::find_commit_and_containers_in(
+                &ws.display_stacks().unwrap_or_default(),
+                *commit_id,
+            )
+            .and_then(|(stack, _, _)| stack.id)
         };
 
         let source = if let Some(stack_id) = stack_id

@@ -26,7 +26,10 @@ fn graph_workspace_inner(
         Default::default()
     };
     let mut root = Tree::new(workspace.debug_string());
-    for stack in &workspace.stacks {
+    let display_stacks = workspace
+        .display_stacks()
+        .expect("BUG: display must derive for rendering");
+    for stack in &display_stacks {
         root.push(tree_for_stack(
             workspace,
             stack,

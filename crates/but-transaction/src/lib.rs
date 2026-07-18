@@ -441,7 +441,7 @@ where
                 if matches!(
                     position,
                     but_workspace::branch::create_reference::Position::Below
-                ) && segment.commits.is_empty()
+                ) && segment.tip().is_none()
                 {
                     (
                         Some(
@@ -456,8 +456,10 @@ where
                     let oldest_commit_id = segment
                         .commits
                         .last()
-                        .map(|commit| commit.id)
-                        .or_else(|| workspace.branch_resting_commit_id(ref_name.as_ref()))
+                        .copied()
+                        .or_else(|| {
+                            workspace.branch_resting_commit_id_in_display(ref_name.as_ref())
+                        })
                         .ok_or_else(|| {
                             anyhow::anyhow!(
                                 "Cannot position reference below unborn segment '{}'",
@@ -476,7 +478,7 @@ where
             anchor => (anchor, None),
         };
         let mut meta = RecordingMetadata {
-            workspace_name: workspace.ref_name().map(ToOwned::to_owned),
+            workspace_name: workspace.ref_name_owned(),
             workspace: workspace.metadata.clone(),
             updates: Vec::new(),
         };
@@ -1176,7 +1178,7 @@ fn workspace_state_from_rebase<M: RefMetadata>(
         }
         let outcome = but_workspace::branch::apply(
             branch.name.as_ref(),
-            workspace.clone(),
+            &workspace,
             repo,
             materialized.meta,
             but_workspace::branch::apply::Options {

@@ -161,7 +161,7 @@ workspace_ref_created=false
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   9d5d9e5 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   a7a8e9d (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 | * 9f9d5a6 (feature-branch) Add feature
 * | 9477ae7 (A) add A
@@ -241,7 +241,7 @@ fn local_branch_with_json_output() {
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   9d5d9e5 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   a7a8e9d (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 | * 9f9d5a6 (feature-branch) Add feature
 * | 9477ae7 (A) add A
@@ -324,7 +324,7 @@ Applied remote branch 'origin/remote-feature' to workspace
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   1bb7daf (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   c2021d8 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 | * ba02e5f (origin/remote-feature, remote-feature) Add remote feature
 * | 9477ae7 (A) add A
@@ -375,7 +375,7 @@ Applied remote branch 'origin/remote-feature' to workspace
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   1bb7daf (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   c2021d8 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 | * ba02e5f (origin/remote-feature, remote-feature) Add remote feature
 * | 9477ae7 (A) add A
@@ -435,7 +435,7 @@ Applied remote branch 'origin/remote-feature' to workspace
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*   1bb7daf (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   c2021d8 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 | * ba02e5f (upstream/remote-feature, origin/remote-feature, remote-feature) Add remote feature
 * | 9477ae7 (A) add A
@@ -555,7 +555,7 @@ Applied branch 'feature-2' to workspace
     snapbox::assert_data_eq!(
         env.git_log(),
         snapbox::str![[r#"
-*-.   7044ae9 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*-.   088a75a (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\ \  
 | | * 4e81b31 (feature-2) Add feature 2
 | * | 9c2fe5c (feature-1) Add feature 1

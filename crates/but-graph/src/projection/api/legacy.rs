@@ -65,7 +65,7 @@ impl Workspace {
         first_parent: FirstParent,
     ) -> Result<Vec<HeadStatus>> {
         let mut heads = self
-            .stacks
+            .display_stacks()?
             .iter()
             .filter_map(|stack| stack.tip_skip_empty())
             .collect::<Vec<_>>();

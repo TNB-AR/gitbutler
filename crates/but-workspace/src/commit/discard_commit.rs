@@ -2,10 +2,7 @@
 
 use anyhow::bail;
 use but_core::RefMetadata;
-use but_rebase::graph_rebase::{
-    Editor, Step, SuccessfulRebase,
-    selector::{SelectorSet, StepRange},
-};
+use but_rebase::graph_rebase::{Editor, SuccessfulRebase};
 
 /// Discard one or more commits in a single rebase operation.
 ///
@@ -24,14 +21,7 @@ pub fn discard_commits<'meta, M: RefMetadata>(
         }
         count += 1;
         let (selector, _commit) = editor.find_selectable_commit(commit_id)?;
-
-        let range = StepRange {
-            child: selector,
-            parent: selector,
-        };
-
-        editor.disconnect_range_from(range, SelectorSet::All, SelectorSet::All, false)?;
-        editor.replace(selector, Step::None)?;
+        editor.remove_commit(selector)?;
     }
 
     if count == 0 {

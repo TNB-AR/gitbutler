@@ -33,14 +33,13 @@ pub fn branch_details(
     meta: &impl RefMetadata,
     project_meta: &ProjectMeta,
 ) -> anyhow::Result<ui::BranchDetails> {
-    workspace_data_of_default_workspace_branch(meta)?.context(
-        "TODO: cannot run in non-workspace mode yet.\
-        It would need a way to deal with limiting the commit traversal",
-    )?;
+    // Non-workspace mode would need a way to limit the commit traversal.
+    workspace_data_of_default_workspace_branch(meta)?
+        .context("Branch details are only available inside a GitButler workspace")?;
     let integration_branch_name = project_meta
         .target_ref
         .clone()
-        .context("TODO: a target to integrate with is currently needed for a workspace commit")?;
+        .context("Branch details require a configured target branch to integrate with")?;
     let mut integration_branch = repo
         .find_reference(&integration_branch_name)
         .context("The branch to integrate with must be present")?;

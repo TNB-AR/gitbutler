@@ -299,12 +299,12 @@ pub fn branch_of_commit(
     commit_id: gix::ObjectId,
     prefer: Option<StackId>,
 ) -> Option<String> {
-    let ordered = ws
-        .stacks
+    let display_stacks = ws.display_stacks().ok()?;
+    let ordered = display_stacks
         .iter()
         .filter(|stack| prefer.is_none() || stack.id == prefer)
         .chain(
-            ws.stacks
+            display_stacks
                 .iter()
                 .filter(|stack| prefer.is_some() && stack.id != prefer),
         );

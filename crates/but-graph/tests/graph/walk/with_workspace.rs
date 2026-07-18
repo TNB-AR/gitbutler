@@ -309,9 +309,10 @@ fn no_overzealous_stacks_due_to_workspace_metadata() -> anyhow::Result<()> {
         snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
 ├── ≡:anon: on a821094 {2}
-│   └── :anon:
-│       ├── ·835086d (🏘️) ►four, ►three
-│       └── ·ff310d3 (🏘️)
+│   ├── :anon:
+│   │   ├── ·835086d (🏘️) ►four, ►three
+│   │   └── ·ff310d3 (🏘️)
+│   └── 📙:feat-2
 └── ≡📙:X <> origin/X⇡1 on 3183e43 {1}
     └── 📙:X <> origin/X⇡1
         ├── ·0b203b5 (🏘️)
@@ -633,6 +634,9 @@ layout:
     │   └── ·320e105 (🏘️) ►tags/without-ref
     ├── 📙:B-empty
     │   └── ·2a31450 (🏘️) ►ambiguous-01
+    ├── 📙:A-empty-03
+    ├── 📙:A-empty-02
+    ├── 📙:A-empty-01
     └── 📙:A
         └── ❄70bde6b (🏘️)
 
@@ -676,6 +680,7 @@ layout:
     │   └── ·320e105 (🏘️) ►tags/without-ref
     ├── 📙:B-empty
     │   └── ·2a31450 (🏘️) ►ambiguous-01
+    ├── 📙:A
     └── 👉📙:A-empty-01
         └── ❄70bde6b (🏘️) ►A-empty-02, ►A-empty-03
 
@@ -706,6 +711,7 @@ layout:
 │   │   └── ·320e105 (🏘️) ►tags/without-ref
 │   ├── 📙:B-empty
 │   │   └── ·2a31450 (🏘️) ►ambiguous-01
+│   ├── 📙:A
 │   └── 📙:A-empty-01
 │       └── ❄70bde6b (🏘️) ►A-empty-02, ►A-empty-03
 ├── ≡👉📙:new-A on fafd9d0 {2}
@@ -1229,8 +1235,8 @@ fn entrypoint_inside_second_parent_of_workspace_diamond_is_included() -> anyhow:
 "#]]
     );
 
-    let entrypoint_stack_segment = ws
-        .stacks
+    let display_stacks = ws.display_stacks()?;
+    let entrypoint_stack_segment = display_stacks
         .iter()
         .flat_map(|stack| stack.segments.iter())
         .find(|segment| segment.is_entrypoint)
@@ -1514,15 +1520,15 @@ layout:
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
-📕🏘️⚠️:G <> ✓refs/remotes/remote-0/H on fafd9d0
-├── ≡📙:A on fafd9d0 {0}
-│   ├── 📙:A
-│   ├── 📙:B
-│   └── 📙:C
-└── ≡📙:D on fafd9d0 {1}
-    ├── 📙:D
-    ├── 📙:E
-    └── 📙:F
+📕🏘️⚠️:A <> ✓refs/remotes/remote-0/B on fafd9d0
+├── ≡📙:C on fafd9d0 {0}
+│   ├── 📙:C
+│   ├── 📙:D
+│   └── 📙:E
+└── ≡📙:F on fafd9d0 {1}
+    ├── 📙:F
+    ├── 📙:G
+    └── 📙:H
 
 "#]]
     );
@@ -1970,6 +1976,7 @@ layout:
     ├── 📙:G
     ├── 📙:F
     │   └── ·16f132b (🏘️)
+    ├── 📙:D
     └── 📙:E
         └── ·917b9da (🏘️)
 
@@ -2010,6 +2017,7 @@ layout:
     ├── 📙:G
     ├── 📙:F
     │   └── ·16f132b (🏘️)
+    ├── 📙:D
     └── 📙:E
         └── ·917b9da (🏘️)
 
@@ -2760,9 +2768,10 @@ layout:
         snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣6 on 79bbb29
 └── ≡📙:B on 79bbb29 {0}
-    └── 📙:B
-        ├── ·6b1a13b (🏘️)
-        └── ·03ad472 (🏘️)
+    ├── 📙:B
+    │   ├── ·6b1a13b (🏘️)
+    │   └── ·03ad472 (🏘️)
+    └── 📙:A
 
 "#]]
     );
@@ -2803,9 +2812,10 @@ layout:
         snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣6 on 79bbb29
 └── ≡📙:B on 79bbb29 {0}
-    └── 📙:B
-        ├── ·6b1a13b (🏘️)
-        └── ·03ad472 (🏘️)
+    ├── 📙:B
+    │   ├── ·6b1a13b (🏘️)
+    │   └── ·03ad472 (🏘️)
+    └── 📙:A
 
 "#]]
     );
@@ -3267,6 +3277,7 @@ fn workspace_without_target_can_see_remote() -> anyhow::Result<()> {
             branches: vec![WorkspaceStackBranch {
                 ref_name: ref_name.try_into()?,
                 archived: false,
+                parents: None,
             }],
             workspacecommit_relation: WorkspaceCommitRelation::Merged,
         });
@@ -4177,7 +4188,8 @@ layout:
         snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣17 on 3183e43
 └── ≡📙:A on 3183e43 {3}
-    └── 📙:A
+    ├── 📙:A
+    └── 📙:B
 
 "#]]
     );
@@ -4934,9 +4946,11 @@ layout:
         snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 1818c17
 └── ≡📙:B <> origin/B⇡1⇣1 on 1818c17 {0}
-    └── 📙:B <> origin/B⇡1⇣1
-        ├── 🟣e0bd0a7
-        └── ·da597e8 (🏘️)
+    ├── 📙:B <> origin/B⇡1⇣1
+    │   ├── 🟣e0bd0a7
+    │   └── ·da597e8 (🏘️)
+    └── 📙:A <> origin/A⇣1
+        └── 🟣0b6b861
 
 "#]]
     );
@@ -6326,16 +6340,18 @@ layout:
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-└── ≡:anon: on bce0c5e {1}
-    ├── :anon:
-    │   └── ·a7131b1 (🏘️)
-    ├── :intermediate-ref
-    │   ├── ·4d3831e (🏘️)
-    │   ├── ·468357f (🏘️)
-    │   ├── ·118ddbb (🏘️)
-    │   └── ·619d548 (🏘️)
-    └── 📙:B
-        └── ·8a352d5 (🏘️)
+├── ≡:anon: on bce0c5e {1}
+│   ├── :anon:
+│   │   └── ·a7131b1 (🏘️)
+│   ├── :intermediate-ref
+│   │   ├── ·4d3831e (🏘️)
+│   │   ├── ·468357f (🏘️)
+│   │   ├── ·118ddbb (🏘️)
+│   │   └── ·619d548 (🏘️)
+│   └── 📙:B
+│       └── ·8a352d5 (🏘️)
+└── ≡📙:A on 6fdab32 {0}
+    └── 📙:A
 
 "#]]
     );
@@ -6374,16 +6390,18 @@ layout:
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-└── ≡:anon: on bce0c5e {1}
-    ├── :anon:
-    │   └── ·a7131b1 (🏘️)
-    ├── :intermediate-ref
-    │   ├── ·4d3831e (🏘️)
-    │   ├── ·468357f (🏘️)
-    │   ├── ·118ddbb (🏘️)
-    │   └── ·619d548 (🏘️)
-    └── 📙:B
-        └── ·8a352d5 (🏘️)
+├── ≡:anon: on bce0c5e {1}
+│   ├── :anon:
+│   │   └── ·a7131b1 (🏘️)
+│   ├── :intermediate-ref
+│   │   ├── ·4d3831e (🏘️)
+│   │   ├── ·468357f (🏘️)
+│   │   ├── ·118ddbb (🏘️)
+│   │   └── ·619d548 (🏘️)
+│   └── 📙:B
+│       └── ·8a352d5 (🏘️)
+└── ≡📙:A on 6fdab32 {0}
+    └── 📙:A
 
 "#]]
     );
@@ -6807,7 +6825,7 @@ fn dependent_branch_on_base() -> anyhow::Result<()> {
 ├───╯
 *  🏁·3183e43 (⌂|🏘|✓) ►B, ►below-A, ►below-B, ►below-C, ►below-below-A, ►below-below-B, ►below-below-C, ►main, ►origin/main <> origin/main
 layout:
-  materialized parents: a0385a8: 49d4b34 3183e43 f9e2cb7
+  materialized parents: a0385a8: 3183e43 f9e2cb7 49d4b34
   empty chain anchors: 49d4b34^ 3183e43 f9e2cb7^
 "#]]
     );
@@ -7336,7 +7354,7 @@ fn ambiguous_worktrees() -> anyhow::Result<()> {
 *  ·081bae9 (⌂|🏘|✓) ►A, ►A-inside[📁wt-A-inside], ►A-outside[📁wt-A-outside] <> origin/A
 *  🏁·3183e43 (⌂|🏘|✓)
 layout:
-  materialized parents: a5f94a2: 3e01e28 081bae9
+  materialized parents: a5f94a2: 081bae9 3e01e28
   empty chain anchors: 081bae9
 "#]]
     );
@@ -7806,7 +7824,7 @@ fn reproduce_12146() -> anyhow::Result<()> {
 *  ·81d4e38 (⌂|🏘) ►A
 *  🏁·e32cf47 (⌂|🏘|✓) ►main, ►origin/main <> origin/main
 layout:
-  materialized parents: d77ecda: 7163661 81d4e38
+  materialized parents: d77ecda: 81d4e38 7163661
   empty chain anchors: 81d4e38^ 7163661^
 "#]]
     );

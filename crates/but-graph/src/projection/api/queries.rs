@@ -5,7 +5,7 @@
 
 use anyhow::Context;
 
-use crate::{Workspace, workspace::StackSegment};
+use crate::{Workspace, workspace::find_segment_owner_indexes_by_refname};
 
 /// Legacy query helpers kept for callers that still depend on compatibility
 /// semantics.
@@ -36,31 +36,79 @@ impl Workspace {
         self.tip_commit_id
     }
 
-    /// Where the branch named `name` rests: its own tip commit, or — when it is empty —
-    /// the first commit of a segment below it in the same stack, or the stack's base.
-    /// `None` if `name` isn't a workspace stack branch.
-    pub fn branch_resting_commit_id(&self, name: &gix::refs::FullNameRef) -> Option<gix::ObjectId> {
-        let (stack_idx, seg_idx) = self.find_segment_owner_indexes_by_refname(name)?;
-        let stack = &self.stacks[stack_idx];
-        stack.segments[seg_idx..]
-            .iter()
-            .find_map(|segment| segment.commits.first().map(|commit| commit.id))
-            .or_else(|| stack.base())
-    }
-
-    /// Like [`Self::branch_resting_commit_id()`], but with distinct errors for an unknown
-    /// branch and for the impossible no-base case.
+    /// The commit the branch `name` RESTS on in the segment graph — its own tip, seen
+    /// through empty segments to the first tip at-or-below, else the stack base — with
+    /// distinct errors for an unknown branch and the impossible no-base case. The
+    /// operation-facing answer; [`Workspace::branch_resting_commit_id_in_display()`]
+    /// answers over the pruned display instead.
     pub fn try_branch_resting_commit_id(
         &self,
         name: &gix::refs::FullNameRef,
     ) -> anyhow::Result<gix::ObjectId> {
-        let (stack_idx, seg_idx) = self.try_find_segment_owner_indexes_by_refname(name)?;
-        let stack = &self.stacks[stack_idx];
-        stack.segments[seg_idx..]
+        let (stack_idx, seg_idx) = self
+            .segment_graph
+            .segment_location_by_name(name)
+            .with_context(|| {
+                format!(
+                    "Couldn't find any stack that contained the branch named '{}'",
+                    name.shorten()
+                )
+            })?;
+        let stack = &self.segment_graph.stacks[stack_idx];
+        stack
+            .segments_at_or_below(seg_idx)
             .iter()
-            .find_map(|segment| segment.commits.first().map(|commit| commit.id))
-            .or_else(|| stack.base())
+            .find_map(|segment| segment.tip())
+            .or(stack.base)
             .context("BUG: we should always see through to the base or eligible commits")
+    }
+
+    /// The nearest branch naming a metadata-carrying segment relative to `commit_id`'s
+    /// segment in the segment graph: searching DOWN toward the base from that segment
+    /// first, then UP toward the tip. Returns the branch and whether it sits at-or-below
+    /// the commit's segment (`true`) or above it (`false`) — the anchor a new dependent
+    /// reference orders against. `None` if `commit_id` isn't in the segment graph, or
+    /// its stack has no such named segment.
+    pub fn nearest_named_metadata_segment(
+        &self,
+        commit_id: gix::ObjectId,
+    ) -> Option<(&gix::refs::FullNameRef, bool)> {
+        let answer = {
+            let (stack_idx, seg_idx) = self.segment_containing(commit_id)?;
+            let stack = &self.segment_graph.stacks[stack_idx];
+            let named_metadata = |i: usize| {
+                let s = stack.segments.get(i)?;
+                s.ref_name
+                    .as_ref()
+                    .map(|n| n.as_ref())
+                    .filter(|_| s.has_metadata)
+            };
+            (0..=seg_idx)
+                .rev()
+                .find_map(|i| named_metadata(i).map(|rn| (rn, true)))
+                .or_else(|| {
+                    (seg_idx + 1..stack.segments.len())
+                        .find_map(|i| named_metadata(i).map(|rn| (rn, false)))
+                })
+        };
+        answer
+    }
+
+    /// The `(stack_idx, segment_idx)` of the segment-graph segment owning `commit_id`: a
+    /// first-parent walk from each segment's tip down to (exclusive) its boundary — the
+    /// segment graph's commit-containment recipe.
+    pub(crate) fn segment_containing(&self, commit_id: gix::ObjectId) -> Option<(usize, usize)> {
+        self.segment_graph
+            .stacks
+            .iter()
+            .enumerate()
+            .find_map(|(stack_idx, stack)| {
+                stack.segments.iter().enumerate().find_map(|(seg_idx, s)| {
+                    s.commits
+                        .contains(&commit_id)
+                        .then_some((stack_idx, seg_idx))
+                })
+            })
     }
 
     /// The commit that `name` points to, directly or indirectly: the segment named `name` —
@@ -73,6 +121,22 @@ impl Workspace {
             let tip = self.tip_ref_info.as_ref()?;
             (tip.ref_name.as_ref() == name).then_some(tip.commit_id)?
         })
+    }
+
+    /// Whether `name` is its stack's TIP branch — the topmost named segment of the
+    /// stack containing it in the segment graph. The question operations ask
+    /// as "does removing this branch drop the whole stack's workspace parent, or is it
+    /// a mid-stack de-listing?".
+    ///
+    /// Answered from the reconciled VIEW, not a raw graph walk: tip-ness is a RECONCILED
+    /// property. Two probed counter-examples pin why — two stacks sharing one commit
+    /// are separated only by metadata (a graph walk sees one group), and an at-bound
+    /// stack exists only through the reconciliation's surfacing passes.
+    pub fn is_stack_tip(&self, name: &gix::refs::FullNameRef) -> bool {
+        let answer = self.segment_graph.stacks.iter().any(|stack| {
+            stack.segments.iter().find_map(|segment| segment.ref_name()) == Some(name)
+        });
+        answer
     }
 
     /// Return the full [`RefInfo`](crate::RefInfo) of the workspace tip segment, if the tip
@@ -149,6 +213,25 @@ impl Workspace {
     /// integrated traversal tip.
     pub fn effective_target_commit_id(&self) -> Option<gix::ObjectId> {
         self.effective_target_commit_id
+    }
+}
+
+/// Display-only points of interest — resolved against the pruned display projection.
+impl Workspace {
+    /// Where the branch named `name` rests: its own tip commit, or — when it is empty —
+    /// the first commit of a segment below it in the same stack, or the stack's base.
+    /// `None` if `name` isn't a workspace stack branch.
+    pub fn branch_resting_commit_id_in_display(
+        &self,
+        name: &gix::refs::FullNameRef,
+    ) -> Option<gix::ObjectId> {
+        let stacks = self.display_stacks().ok()?;
+        let (stack_idx, seg_idx) = find_segment_owner_indexes_by_refname(&stacks, name)?;
+        let stack = stacks.get(stack_idx)?;
+        stack.segments[seg_idx..]
+            .iter()
+            .find_map(|segment| segment.commits.first().map(|commit| commit.id))
+            .or_else(|| stack.base())
     }
 }
 
@@ -429,12 +512,15 @@ impl Workspace {
             return None;
         }
         let on = layout.positioned_on(name)?;
-        let stack_tips: Vec<(gix::ObjectId, &StackSegment)> = self
+        // The SEGMENT GRAPH's tip set, not the pruned display: a superseding tip pruned from the
+        // display still supersedes. (Tripwire below keeps it honest against the reconciliation.)
+        let stack_tips: Vec<(gix::ObjectId, &crate::workspace::Segment)> = self
+            .segment_graph
             .stacks
             .iter()
             .filter_map(|stack| {
-                let tip = stack.segments.first()?;
-                tip.commits.first().map(|c| (c.id, tip))
+                let top = stack.top()?;
+                top.tip().map(|id| (id, top))
             })
             .collect();
 
@@ -458,8 +544,8 @@ impl Workspace {
             if let Some((_, segment)) = stack_tips.iter().find(|(cid, _)| *cid == id) {
                 // Prune below a match, like the segment traversal did.
                 matches.push(StackTip {
-                    ref_name: segment.ref_name().map(|rn| rn.to_owned()),
-                    commit_id: segment.commits.first().map(|c| c.id),
+                    ref_name: segment.ref_name.clone(),
+                    commit_id: segment.tip(),
                 });
                 continue;
             }

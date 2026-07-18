@@ -197,6 +197,13 @@ bitflags! {
         const Integrated = 1 << 2;
         /// The commit is listed in the repository's shallow boundary file.
         const ShallowBoundary = 1 << 3;
+        /// Strictly BELOW the workspace lower bound — the base's ancestors (NOT the base
+        /// itself). The rebase editor treats these as FIXED anchors (never rewrites them),
+        /// bounding its mutable set to the workspace's own commits. The base stays editable
+        /// so operations can reorder around it (e.g. moving a commit below `main` when the
+        /// merge-base IS `main`). Unlike the flags above (set at build time), this is set
+        /// during reconciliation, once the lower bound is known.
+        const BelowBound = 1 << 4;
     }
 }
 
@@ -204,10 +211,12 @@ impl CommitFlags {
     /// Return a less verbose debug string. Goal bits are stripped at the arena
     /// boundary, so only the named flags render.
     pub fn debug_string(&self) -> String {
-        if self.is_empty() {
+        // BelowBound is an editor-bound concern set during reconciliation, not a walk fact;
+        // keep it out of the debug output so it doesn't clutter graph/projection snapshots.
+        let flags = *self & (Self::all() - Self::BelowBound);
+        if flags.is_empty() {
             "".into()
         } else {
-            let flags = *self & Self::all();
             let string = format!("{flags:?}");
             let out = &string["CommitFlags(".len()..];
             out[..out.len() - 1]

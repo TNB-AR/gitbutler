@@ -1,4 +1,4 @@
-//! These tests exercise the add_step, insert_edge and remove_edge operations.
+//! These tests exercise the add_step, insert_edge and detach operations.
 
 use anyhow::Result;
 use but_core::Commit;
@@ -182,7 +182,7 @@ fn remove_edge_returns_no_orders_when_no_edges_found() -> Result<()> {
     let c_selector = editor.select_commit(c)?;
     let a_selector = editor.select_commit(a)?;
 
-    editor.remove_edges(c_selector, a_selector)?;
+    editor.detach(c_selector, a_selector)?;
 
     Ok(())
 }
@@ -205,7 +205,7 @@ fn removing_an_existing_edge_returns_its_order_and_allows_readding_it() -> Resul
     let b_selector = editor.select_commit(b)?;
     let a_selector = editor.select_commit(a)?;
 
-    assert_eq!(editor.remove_edges(b_selector, a_selector)?, vec![0]);
+    assert_eq!(editor.detach(b_selector, a_selector)?, vec![0]);
     editor.insert_edge(b_selector, a_selector, 0)?;
 
     snapbox::assert_data_eq!(

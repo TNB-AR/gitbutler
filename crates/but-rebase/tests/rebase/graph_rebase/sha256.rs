@@ -241,7 +241,7 @@ Sha256
     let b_ref_selector = editor.select_reference(b_refname.as_ref())?;
     let (b_selector, _) = editor.find_reference_target(b_ref_selector)?;
 
-    let removed_orders = editor.remove_edges(inner_merge_selector, b_ref_selector)?;
+    let removed_orders = editor.detach(inner_merge_selector, b_ref_selector)?;
     snapbox::assert_data_eq!(
         removed_orders.to_debug(),
         snapbox::str![[r#"

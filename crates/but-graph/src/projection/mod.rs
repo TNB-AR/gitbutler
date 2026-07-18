@@ -16,7 +16,7 @@ mod collect;
 mod frame;
 mod init;
 pub use api::StackTip;
-pub(crate) use init::project_workspace;
+pub(crate) use init::reconcile_workspace;
 
 #[cfg(feature = "legacy")]
 pub use api::HeadStatus;
@@ -106,13 +106,15 @@ pub(crate) struct EntrypointInfo {
     pub is_ws_tip: bool,
 }
 
-/// A workspace reference is a list of [Stacks](Stack) projected over a [`CommitGraph`](crate::CommitGraph).
+/// The workspace: the commit graph (with its stored ref layout), the build context,
+/// and the frame — everything the derivations run from — plus the scalar facts
+/// captured at build time. The reconciled partition is stored ONLY as its
+/// [`segment_graph`](Self::segment_graph) reduction — the operations' authority; materialized
+/// stacks exist per [`display_stacks`](Self::display_stacks) call, for display alone.
 #[derive(Clone)]
 pub struct Workspace {
     /// Specify what kind of workspace this is.
     pub kind: WorkspaceKind,
-    /// One or more stacks that live in the workspace, in order of parents of the workspace commit if there are more than one.
-    pub stacks: Vec<Stack>,
     /// The commit all workspace commits build on — the boundary at the bottom beyond which
     /// nothing belongs to the workspace. It is the longest path to the first commit shared
     /// with the target across all stacks, or, without a target, the first commit all stacks
@@ -140,10 +142,20 @@ pub struct Workspace {
     ///
     /// Do not use this data to understand the workspace. It's unreconciled metadata which may
     /// have nothing to do with the actual workspace.
-    /// To see that, look at [Self::stacks].
+    /// To see that, look at the [`segment_graph`](Self::segment_graph) or
+    /// [`display_stacks`](Self::display_stacks).
     pub metadata: Option<ref_metadata::Workspace>,
 
-    // ── The carried substrate. ──
+    // ── The derivation inputs. ──
+    /// The frame the workspace was built from, retained VERBATIM so the reconciliation
+    /// derives from the exact build-time inputs (the public `metadata`/`kind` copies may
+    /// be mutated by legacy callers; the derivation must not see that).
+    pub(crate) frame: frame::WorkspaceFrame,
+    /// The reconciled stack PARTITION as a fact: which refs form which stacks, in declared
+    /// order, at their full in-workspace extent — reduced from the reconciliation at
+    /// construction like every other captured fact. The operations-facing shape the
+    /// membership queries are migrating onto.
+    pub segment_graph: SegmentGraph,
     /// The commit graph the workspace was projected from — the commit-addressed
     /// substrate all queries answer from.
     pub(crate) commit_graph: crate::CommitGraph,
@@ -172,79 +184,31 @@ pub struct Workspace {
     /// The target-side commits ahead of the workspace base, from the target tip downward.
     /// `None` without a resolved target ref.
     pub(crate) incoming_target_commit_ids: Option<Vec<gix::ObjectId>>,
+    /// Whether integrated tips exist — the upstream advanced past the stored target. A frame
+    /// fact captured for [`Self::project`], which consumes it to prune integrated segments.
+    pub(crate) upstream_advanced_past_target: bool,
     /// Whether more than one unique worktree is referenced by the graph — the commit debug
     /// renderer keys ownership markers off it.
     pub(crate) has_multiple_worktrees: bool,
 }
 
-/// Construction: the workspace-level entry points, mirroring the graph traversals. These are
-/// what operations use — the segment view is a build/projection detail, and nothing
-/// outside the crate can build one. (The fold: builder and projection fuse behind these.)
 impl Workspace {
-    /// An empty ad-hoc workspace over an empty graph, for tests that only exercise
-    /// projection-level data.
+    /// THE reconciliation, derived fresh from the carried inputs — commit graph (with
+    /// its stored ref layout), build context, and the retained frame. The [`segment_graph`](Self::segment_graph)
+    /// is its build-time reduction (the stored partition authority); the display derives
+    /// from a fresh run per [`display_stacks`](Self::display_stacks) call.
+    pub fn derive_reconciled(&self) -> Vec<Stack> {
+        init::reconciled_stacks(&self.commit_graph, &self.ctx, &self.frame)
+    }
+
+    /// Replace the segment graph with one reduced from hand-built `stacks` — for tests.
     #[doc(hidden)]
-    pub fn empty_ad_hoc_for_testing() -> Self {
-        Workspace {
-            kind: WorkspaceKind::AdHoc,
-            stacks: vec![],
-            lower_bound: None,
-            target_ref: None,
-            target_commit: None,
-            metadata: None,
-            commit_graph: crate::CommitGraph::default(),
-            ctx: GraphContext::default(),
-            tip_ref_info: None,
-            tip_commit_id: None,
-            lower_bound_ref_name: None,
-            entrypoint: None,
-            target_ref_commit_id: None,
-            effective_target_commit_id: None,
-            commits_below_tip: Vec::new(),
-            incoming_target_commit_ids: None,
-            has_multiple_worktrees: false,
-        }
+    pub fn set_segment_graph_from_stacks_for_testing(&mut self, stacks: &[Stack]) {
+        self.segment_graph = SegmentGraph::from_stacks(stacks);
     }
 
-    /// Build the workspace as seen from `HEAD` — the standard entry point.
-    pub fn from_head(
-        repo: &gix::Repository,
-        meta: &impl but_core::RefMetadata,
-        project_meta: but_core::ref_metadata::ProjectMeta,
-        options: crate::walk::Options,
-    ) -> anyhow::Result<Self> {
-        let (cg, ctx) = crate::CommitGraph::from_head(repo, meta, project_meta, options)?;
-        project_workspace(cg, ctx)
-    }
-
-    /// Build the workspace as seen from `tip` (a checkout or preview position), named by
-    /// `ref_name` if the position is checked out as a ref.
-    pub fn from_tip(
-        tip: gix::Id<'_>,
-        ref_name: impl Into<Option<gix::refs::FullName>>,
-        meta: &impl but_core::RefMetadata,
-        project_meta: but_core::ref_metadata::ProjectMeta,
-        options: crate::walk::Options,
-    ) -> anyhow::Result<Self> {
-        let (cg, ctx) = crate::CommitGraph::from_tip(tip, ref_name, meta, project_meta, options)?;
-        project_workspace(cg, ctx)
-    }
-
-    /// Build the workspace from multiple `tips` at once — the multi-tip variant of
-    /// [`Self::from_tip`].
-    pub fn from_seeds(
-        repo: &gix::Repository,
-        tips: impl IntoIterator<Item = crate::walk::Seed>,
-        meta: &impl but_core::RefMetadata,
-        project_meta: but_core::ref_metadata::ProjectMeta,
-        options: crate::walk::Options,
-    ) -> anyhow::Result<Self> {
-        let (cg, ctx) = crate::CommitGraph::from_seeds(repo, tips, meta, project_meta, options)?;
-        project_workspace(cg, ctx)
-    }
-
-    /// Re-read the world with in-memory `overlay` refs and metadata, yielding the workspace as
-    /// it would look after applying them.
+    /// Re-read the world with in-memory `overlay` refs and metadata, yielding the
+    /// workspace as it would look after applying them — the mutation-facing rebuild.
     pub fn redo(
         &self,
         repo: &gix::Repository,
@@ -282,8 +246,8 @@ impl Workspace {
                 (seed, ref_name)
             }
         };
-        // The same dispatch as `from_tip`, with the overlay served from memory by
-        // the builders.
+        // The same dispatch as `Workspace::from_tip`, with the overlay served from memory
+        // by the builders.
         let (cg, ctx) = crate::CommitGraph::dispatch_tip(
             repo.for_attach_only(),
             seed,
@@ -293,7 +257,116 @@ impl Workspace {
             self.ctx.options.clone(),
             overlay_for_flip,
         )?;
-        project_workspace(cg, ctx)
+        init::reconcile_workspace(cg, ctx)
+    }
+
+    /// Preview `commit_graph` — typically a not-yet-materialized rebase's mutated arena —
+    /// with the rebase's pending ref edits and entrypoint served from `overlay`, yielding
+    /// the workspace as it would look once materialized.
+    ///
+    /// Falls back to an overlay rewalk ([`Self::redo`]) when the commit graph has nothing to
+    /// project: the entrypoint is unborn or points outside the graph.
+    pub fn preview_from_commit_graph(
+        &self,
+        commit_graph: crate::CommitGraph,
+        repo: &gix::Repository,
+        meta: &impl but_core::RefMetadata,
+        overlay: crate::walk::Overlay,
+    ) -> anyhow::Result<Self> {
+        match crate::workspace_from_commit_graph(
+            commit_graph,
+            repo,
+            meta,
+            self.ctx.project_meta.clone(),
+            self.ctx.options.clone(),
+            overlay.clone(),
+        )? {
+            Some(preview) => Ok(preview),
+            None => self.redo(repo, meta, overlay),
+        }
+    }
+}
+
+/// Construction: the workspace-level entry points, mirroring the graph traversals. These are
+/// what operations use — the segment view is a build/projection detail, and nothing
+/// outside the crate can build one. (The fold: builder and projection fuse behind these.)
+impl Workspace {
+    /// An empty ad-hoc workspace over an empty graph, for tests that only exercise
+    /// projection-level data.
+    #[doc(hidden)]
+    pub fn empty_ad_hoc_for_testing() -> Self {
+        Workspace {
+            kind: WorkspaceKind::AdHoc,
+            lower_bound: None,
+            target_ref: None,
+            target_commit: None,
+            metadata: None,
+            // Deriving over the empty graph + frame yields no stacks — lazily correct.
+            frame: frame::WorkspaceFrame {
+                kind: WorkspaceKind::AdHoc,
+                metadata: None,
+                tip_commit: None,
+                tip_ref_info: None,
+                entry_ref: None,
+                entry_commit: None,
+                entry_inside: false,
+                lower_bound: None,
+                lower_bound_ref_name: None,
+                target_ref: None,
+                target_commit: None,
+                integrated_tip_commits: Vec::new(),
+            },
+            segment_graph: SegmentGraph::default(),
+            commit_graph: crate::CommitGraph::default(),
+            ctx: GraphContext::default(),
+            tip_ref_info: None,
+            tip_commit_id: None,
+            lower_bound_ref_name: None,
+            entrypoint: None,
+            target_ref_commit_id: None,
+            effective_target_commit_id: None,
+            commits_below_tip: Vec::new(),
+            incoming_target_commit_ids: None,
+            upstream_advanced_past_target: false,
+            has_multiple_worktrees: false,
+        }
+    }
+
+    /// Build the workspace as seen from `HEAD` — the standard entry point.
+    pub fn from_head(
+        repo: &gix::Repository,
+        meta: &impl but_core::RefMetadata,
+        project_meta: but_core::ref_metadata::ProjectMeta,
+        options: crate::walk::Options,
+    ) -> anyhow::Result<Self> {
+        let (cg, ctx) = crate::CommitGraph::from_head(repo, meta, project_meta, options)?;
+        init::reconcile_workspace(cg, ctx)
+    }
+
+    /// Build the workspace as seen from `tip` (a checkout or preview position), named by
+    /// `ref_name` if the position is checked out as a ref.
+    pub fn from_tip(
+        tip: gix::Id<'_>,
+        ref_name: impl Into<Option<gix::refs::FullName>>,
+        meta: &impl but_core::RefMetadata,
+        project_meta: but_core::ref_metadata::ProjectMeta,
+        options: crate::walk::Options,
+    ) -> anyhow::Result<Self> {
+        let (cg, ctx) = crate::CommitGraph::from_tip(tip, ref_name, meta, project_meta, options)?;
+        init::reconcile_workspace(cg, ctx)
+    }
+
+    /// Build the workspace from multiple `tips` at once — the multi-tip variant of
+    /// [`Self::from_tip`].
+    pub fn from_seeds(
+        repo: &gix::Repository,
+        tips: impl IntoIterator<Item = crate::walk::Seed>,
+        meta: &impl but_core::RefMetadata,
+        project_meta: but_core::ref_metadata::ProjectMeta,
+        options: crate::walk::Options,
+    ) -> anyhow::Result<Self> {
+        let (cg, ctx) = crate::CommitGraph::from_seeds(repo, tips, meta, project_meta, options)?;
+        init::reconcile_workspace(cg, ctx)
     }
 
     /// Validate the carried graph's invariants (see `CommitGraph::validation_errors`), passing `self`
@@ -453,7 +526,10 @@ pub(crate) fn upstream_commits(
     collected
 }
 
-fn find_segment_owner_indexes_by_refname(
+/// The `(stack_idx, segment_idx)` of the segment named `ref_name` in `stacks`, if any: the
+/// ref→stack membership query as a free function over a stack slice, callable without a
+/// whole [`Workspace`].
+pub fn find_segment_owner_indexes_by_refname(
     stacks: &[Stack],
     ref_name: &gix::refs::FullNameRef,
 ) -> Option<(usize, usize)> {
@@ -468,4 +544,183 @@ fn find_segment_owner_indexes_by_refname(
                     .then_some((stack_idx, seg_idx))
             })
     })
+}
+
+/// The reconciled stack partition, reduced to what operations consume: per stack its
+/// identity and ordered segments with their anchor commits — no per-commit
+/// materialization. Computed eagerly at construction; commit-level questions walk the
+/// carried graph between a segment's [`tip`](Segment::tip) and
+/// [`boundary`](Segment::boundary).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SegmentGraph {
+    /// The stacks, in workspace (parent) order.
+    pub stacks: Vec<SegmentStack>,
+}
+
+/// One stack of the partition: identity plus its segments, tip→base.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentStack {
+    /// The stable stack id, when declared.
+    pub id: Option<but_core::ref_metadata::StackId>,
+    /// The segments, topmost first. A self-contained node each — the stack is only
+    /// the ordering container.
+    pub segments: Vec<Segment>,
+    /// The commit this stack rests on, if any.
+    pub base: Option<gix::ObjectId>,
+}
+
+/// One segment node: a named (or anonymous) run of commits, reduced to its anchors.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Segment {
+    /// The branch naming this segment; `None` for anonymous runs.
+    pub ref_name: Option<gix::refs::FullName>,
+    /// The commits the claiming assigned to this segment, tip→bottom — the extent as
+    /// the ONE authority decided it (a sibling stack's claim can cut it where no graph
+    /// walk could tell). Ids only: materialization stays display's job.
+    pub commits: Vec<gix::ObjectId>,
+    /// The segment's base as the reconciliation materialized it — the commit below it
+    /// ALONG THE WALKED GRAPH, `None` when the walk was severed or hit a root. Display
+    /// range queries read this.
+    pub base: Option<gix::ObjectId>,
+    /// Whether the branch carries metadata (its sideband was found by name).
+    pub has_metadata: bool,
+    /// See [`StackSegment::name_projected_from_outside`].
+    pub name_projected_from_outside: bool,
+}
+
+impl Segment {
+    /// The segment's name, if not anonymous.
+    pub fn ref_name(&self) -> Option<&gix::refs::FullNameRef> {
+        self.ref_name.as_ref().map(|n| n.as_ref())
+    }
+
+    /// The segment's topmost own commit; `None` for empty segments.
+    pub fn tip(&self) -> Option<gix::ObjectId> {
+        self.commits.first().copied()
+    }
+}
+
+impl SegmentGraph {
+    /// The stack carrying `id`, if any. `None` finds the first identityless stack.
+    pub fn stack_by_id(
+        &self,
+        id: impl Into<Option<but_core::ref_metadata::StackId>>,
+    ) -> Option<&SegmentStack> {
+        let id = id.into();
+        self.stacks.iter().find(|s| s.id == id)
+    }
+
+    /// Every named segment's branch, across all stacks, in workspace order.
+    pub fn segment_names(&self) -> impl Iterator<Item = &gix::refs::FullNameRef> {
+        self.stacks.iter().flat_map(|s| s.segment_names())
+    }
+
+    /// The `(stack_idx, segment_idx)` of the segment named `name`, if any.
+    pub fn segment_location_by_name(
+        &self,
+        name: &gix::refs::FullNameRef,
+    ) -> Option<(usize, usize)> {
+        self.stacks
+            .iter()
+            .enumerate()
+            .find_map(|(stack_idx, stack)| {
+                stack
+                    .segments
+                    .iter()
+                    .position(|s| s.ref_name() == Some(name))
+                    .map(|seg_idx| (stack_idx, seg_idx))
+            })
+    }
+}
+
+impl SegmentStack {
+    /// The stack's name: its topmost segment's branch, if named.
+    pub fn ref_name(&self) -> Option<&gix::refs::FullNameRef> {
+        self.top().and_then(|s| s.ref_name())
+    }
+
+    /// The topmost segment, if any.
+    pub fn top(&self) -> Option<&Segment> {
+        self.segments.first()
+    }
+
+    /// The first non-empty segment's tip — the stack's resting commit above the base.
+    pub fn tip_skip_empty(&self) -> Option<gix::ObjectId> {
+        self.segments.iter().find_map(|s| s.tip())
+    }
+
+    /// The commit this stack RESTS on toward the workspace merge: its first non-empty
+    /// segment's tip, else its base.
+    pub fn resting_commit(&self) -> Option<gix::ObjectId> {
+        self.tip_skip_empty().or(self.base)
+    }
+
+    /// The named segments' branches, top→base.
+    pub fn segment_names(&self) -> impl Iterator<Item = &gix::refs::FullNameRef> {
+        self.segments.iter().filter_map(|s| s.ref_name())
+    }
+
+    /// The segments from `idx` toward the base — a segment and its successors.
+    pub fn segments_at_or_below(&self, idx: usize) -> &[Segment] {
+        self.segments.get(idx..).unwrap_or(&[])
+    }
+}
+
+impl SegmentGraph {
+    /// Reduce materialized `stacks` — the reconciliation output — to the segment graph.
+    pub fn from_stacks(stacks: &[Stack]) -> Self {
+        SegmentGraph {
+            stacks: stacks
+                .iter()
+                .map(|stack| SegmentStack {
+                    id: stack.id,
+                    base: stack.base(),
+                    segments: stack
+                        .segments
+                        .iter()
+                        .map(|segment| Segment {
+                            ref_name: segment.ref_name().map(ToOwned::to_owned),
+                            commits: segment.commits.iter().map(|c| c.id).collect(),
+                            base: segment.base,
+                            has_metadata: segment.metadata.is_some(),
+                            name_projected_from_outside: segment.name_projected_from_outside,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The stack with `id` within `stacks`, if any — bind [`Workspace::display_stacks`] (or the
+/// reconciliation) at the call site and look up in it.
+pub fn find_stack_by_id(
+    stacks: &[Stack],
+    id: impl Into<Option<but_core::ref_metadata::StackId>>,
+) -> Option<&Stack> {
+    let id = id.into();
+    stacks.iter().find(|s| s.id == id)
+}
+
+/// The commit `oid` within `stacks`, with its containing segment and stack.
+pub fn find_commit_and_containers_in(
+    stacks: &[Stack],
+    oid: gix::ObjectId,
+) -> Option<(&Stack, &StackSegment, &StackCommit)> {
+    stacks.iter().find_map(|stack| {
+        stack.segments.iter().find_map(|seg| {
+            seg.commits
+                .iter()
+                .find(|c| c.id == oid)
+                .map(|c| (stack, seg, c))
+        })
+    })
+}
+
+/// Whether `name` names the topmost segment of some stack in `stacks` (a stack TIP): the
+/// tip-ness query as a free function over a stack slice, callable without a [`Workspace`].
+pub fn is_stack_tip(stacks: &[Stack], name: &gix::refs::FullNameRef) -> bool {
+    stacks
+        .iter()
+        .any(|stack| stack.segments.iter().find_map(|segment| segment.ref_name()) == Some(name))
 }

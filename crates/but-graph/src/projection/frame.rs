@@ -8,8 +8,18 @@ use gix::ObjectId;
 use crate::workspace::{GraphContext, WorkspaceKind};
 use crate::{CommitFlags, CommitGraph};
 
+/// What the entrypoint marks — see [`WorkspaceFrame::entry_mark`].
+pub(crate) enum EntryMark<'a> {
+    /// The gate is closed (ad-hoc view or tip entry): nothing marks.
+    None,
+    /// Mark exactly the segments named this.
+    ByName(&'a gix::refs::FullNameRef),
+    /// Mark every segment containing this commit.
+    ByCommit(gix::ObjectId),
+}
+
 /// The commit/name-addressed workspace frame.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct WorkspaceFrame {
     /// What kind of workspace the entrypoint sees, `Managed`'s ref info included.
     pub kind: crate::workspace::WorkspaceKind,
@@ -40,6 +50,41 @@ pub(crate) struct WorkspaceFrame {
 }
 
 impl WorkspaceFrame {
+    /// The entry FACTS every entrypoint semantic derives from, in the one authoritative
+    /// order: the entry ref's name, and the resolved entry commit (build-time resolution
+    /// first, the frame's remembered commit as fallback). Gate separately via
+    /// [`Workspace::is_entrypoint`](crate::Workspace::is_entrypoint) where marking applies.
+    pub(crate) fn entry_facts<'a>(
+        &'a self,
+        ctx: &GraphContext,
+    ) -> (Option<&'a gix::refs::FullNameRef>, Option<ObjectId>) {
+        (
+            self.entry_ref.as_ref().map(|r| r.as_ref()),
+            ctx.entry_resolved_commit.or(self.entry_commit),
+        )
+    }
+
+    /// What the entrypoint MARKS, in the one authoritative order: nothing unless the
+    /// mark gate holds (entry inside a managed workspace); the entry's NAME when it
+    /// names any segment (`names_a_segment` answers over the caller's substrate);
+    /// else every segment containing the entry's resolved commit.
+    pub(crate) fn entry_mark<'a>(
+        &'a self,
+        ctx: &GraphContext,
+        names_a_segment: impl FnOnce(&gix::refs::FullNameRef) -> bool,
+    ) -> EntryMark<'a> {
+        if !(self.entry_inside && self.kind.has_managed_ref()) {
+            return EntryMark::None;
+        }
+        let (ep_name, ep_commit) = self.entry_facts(ctx);
+        match ep_name {
+            Some(name) if names_a_segment(name) => EntryMark::ByName(name),
+            _ => ep_commit
+                .map(EntryMark::ByCommit)
+                .unwrap_or(EntryMark::None),
+        }
+    }
+
     pub(crate) fn derive(cg: &CommitGraph, ctx: &GraphContext) -> Option<Self> {
         let naming = naming_commits(cg);
         let seeds = &cg.seeds;

@@ -61,6 +61,9 @@ pub struct CommitGraph {
     /// [`CommitFlags`](crate::CommitFlags) so it neither perturbs the walk's goal bits nor the
     /// segment fingerprint; used to tell a real managed merge from a ws ref advanced past it.
     managed_ws_commits: HashSet<gix::ObjectId>,
+    /// Per managed workspace commit: the parent↔stack binding its header recorded, if
+    /// any — each slot the bound stack's TIP branch name, `None` = declared anonymous.
+    ws_parent_bindings: HashMap<gix::ObjectId, Vec<Option<gix::refs::FullName>>>,
     /// When built [from the walk](Self::from_walk): whether the traversal stopped queueing after
     /// hitting the hard limit. Derived graphs must carry it forward.
     pub(crate) hard_limit_hit: bool,
@@ -232,11 +235,27 @@ impl CommitGraph {
         id: gix::ObjectId,
     ) {
         if let Ok(commit) = repo.find_commit(id)
-            && let Ok(message) = commit.message_raw()
-            && crate::workspace::commit::is_managed_workspace_by_message(message)
+            && let Ok(decoded) = commit.decode()
+            && crate::workspace::commit::is_managed_workspace_by_message(decoded.message)
         {
             self.managed_ws_commits.insert(id);
+            if let Some(binding) = decoded
+                .extra_headers()
+                .find(but_core::commit::HEADERS_WORKSPACE_PARENTS_FIELD)
+                .and_then(but_core::commit::decode_workspace_parents)
+            {
+                self.ws_parent_bindings.insert(id, binding);
+            }
         }
+    }
+
+    /// The recorded parent↔stack binding of managed workspace commit `id`, if its
+    /// header carried one — writer intent, for the claiming to read instead of infer.
+    pub(crate) fn ws_parent_binding(
+        &self,
+        id: gix::ObjectId,
+    ) -> Option<&[Option<gix::refs::FullName>]> {
+        self.ws_parent_bindings.get(&id).map(|v| v.as_slice())
     }
 
     /// Where traversal/HEAD started (a checkout inside a stack), if any. The projection forces a
@@ -807,6 +826,9 @@ impl CommitGraph {
         if self.managed_ws_commits.remove(&old) {
             self.managed_ws_commits.insert(id);
         }
+        // The rewritten commit on disk was stripped of any recorded binding (picks do
+        // that), so the parsed copy must not outlive it.
+        self.ws_parent_bindings.remove(&old);
     }
 
     /// Overwrite `idx`'s whole parent array — the editor's ordered-parent number write. Every new parent number

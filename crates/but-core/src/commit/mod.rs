@@ -178,6 +178,41 @@ impl Headers {
     }
 }
 
+/// The header field on WORKSPACE merge commits recording, per parent in parent order,
+/// the declared stack each edge was merged for, by its TIP branch's full ref name —
+/// the writer's intent, so the projection can read the parent↔stack binding instead
+/// of inferring it. `_` marks a deliberately anonymous parent; entries are separated
+/// by a space (illegal inside ref names). A renamed tip no longer resolves, so the
+/// binding self-invalidates. Any rewrite that changes parents must strip it (the
+/// rebase editor's picks do).
+pub const HEADERS_WORKSPACE_PARENTS_FIELD: &str = "gitbutler-workspace-parents";
+
+/// Serialize per-parent tip bindings for [`HEADERS_WORKSPACE_PARENTS_FIELD`].
+pub fn encode_workspace_parents(bindings: &[Option<gix::refs::FullName>]) -> BString {
+    let mut out = BString::default();
+    for (idx, binding) in bindings.iter().enumerate() {
+        if idx > 0 {
+            out.push(b' ');
+        }
+        match binding {
+            Some(name) => out.extend_from_slice(name.as_bstr()),
+            None => out.push(b'_'),
+        }
+    }
+    out
+}
+
+/// Parse [`HEADERS_WORKSPACE_PARENTS_FIELD`]; `None` if any entry is malformed.
+pub fn decode_workspace_parents(value: &BStr) -> Option<Vec<Option<gix::refs::FullName>>> {
+    value
+        .split(|b| *b == b' ')
+        .map(|entry| match entry {
+            b"_" => Some(None),
+            name => gix::refs::FullName::try_from(name.as_bstr()).ok().map(Some),
+        })
+        .collect()
+}
+
 const HEADERS_VERSION_FIELD: &str = "gitbutler-headers-version";
 const HEADERS_CHANGE_ID_FIELD: &str = "gitbutler-change-id";
 const HEADERS_NEW_CHANGE_ID_FIELD: &str = "change-id";

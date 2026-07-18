@@ -355,8 +355,11 @@ impl<M: RefMetadata> Editor<'_, M> {
     /// Render an entire [`Editor::graph_workspace`] projection for snapshot
     /// tests: the commits above the workspace, the workspace commit, then each
     /// stack in turn. Each section is rendered with [`Editor::subgraph_ascii`].
-    pub fn graph_workspace_ascii(&self) -> Result<String> {
-        let ws = self.graph_workspace()?;
+    pub fn graph_workspace_ascii(
+        &self,
+        partition: &but_graph::workspace::SegmentGraph,
+    ) -> Result<String> {
+        let ws = self.graph_workspace(partition)?;
         let body = |rendered: String| {
             if rendered.is_empty() {
                 "(empty)".to_string()

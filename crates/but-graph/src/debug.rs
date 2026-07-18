@@ -18,29 +18,10 @@ impl crate::Workspace {
     /// short name.
     pub fn anonymized(mut self, remotes: &gix::remote::Names) -> anyhow::Result<Self> {
         let mut anon = RefAnonymizer::new(remotes);
-        for stack in &mut self.stacks {
-            for segment in &mut stack.segments {
-                if let Some(ri) = segment.ref_info.as_mut() {
-                    anon.apply(&mut ri.ref_name)?;
-                }
-                if let Some(rn) = segment.remote_tracking_ref_name.as_mut() {
-                    anon.apply(rn)?;
-                }
-                for ri in segment
-                    .commits
-                    .iter_mut()
-                    .flat_map(|c| c.refs.iter_mut())
-                    .chain(
-                        segment
-                            .commits_on_remote
-                            .iter_mut()
-                            .flat_map(|c| c.refs.iter_mut()),
-                    )
-                {
-                    anon.apply(&mut ri.ref_name)?;
-                }
-            }
-        }
+        // Rewrite the SOURCES — public fact fields, context, frame, and the graph itself.
+        // Every derivation (the segment graph below, the display per call) re-derives from
+        // them, so anonymized names flow to renderers and the falsified originals
+        // cannot linger anywhere.
         match &mut self.kind {
             crate::workspace::WorkspaceKind::Managed { ref_info }
             | crate::workspace::WorkspaceKind::ManagedMissingWorkspaceCommit { ref_info } => {
@@ -71,7 +52,13 @@ impl crate::Workspace {
                 anon.apply(rn)?;
             }
         }
-        self.ctx.remote_tracking = std::mem::take(&mut self.ctx.remote_tracking)
+        // Alias in sorted-key order: hash-map iteration would hand out aliases in a
+        // different order every process.
+        let mut remote_tracking: Vec<_> = std::mem::take(&mut self.ctx.remote_tracking)
+            .into_iter()
+            .collect();
+        remote_tracking.sort();
+        self.ctx.remote_tracking = remote_tracking
             .into_iter()
             .map(|(mut local, mut remote)| {
                 anon.apply(&mut local)?;
@@ -79,7 +66,64 @@ impl crate::Workspace {
                 Ok((local, remote))
             })
             .collect::<anyhow::Result<_>>()?;
+        let mut branch_details: Vec<_> = std::mem::take(&mut self.ctx.branch_details)
+            .into_iter()
+            .collect();
+        branch_details.sort_by(|(a, _), (b, _)| a.cmp(b));
+        self.ctx.branch_details = branch_details
+            .into_iter()
+            .map(|(mut name, details)| {
+                anon.apply(&mut name)?;
+                Ok((name, details))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        for rn in self.ctx.ad_hoc_branch_stack_orders.iter_mut().flatten() {
+            anon.apply(rn)?;
+        }
+        if let Some(wm) = self.ctx.workspace_meta.as_mut() {
+            anon.apply(&mut wm.ref_name)?;
+            for rn in wm
+                .metadata
+                .stacks
+                .iter_mut()
+                .flat_map(|s| s.branches.iter_mut().map(|b| &mut b.ref_name))
+            {
+                anon.apply(rn)?;
+            }
+        }
+        // The FRAME mirrors the public fields and feeds the derivations verbatim.
+        match &mut self.frame.kind {
+            crate::workspace::WorkspaceKind::Managed { ref_info }
+            | crate::workspace::WorkspaceKind::ManagedMissingWorkspaceCommit { ref_info } => {
+                anon.apply(&mut ref_info.ref_name)?;
+            }
+            crate::workspace::WorkspaceKind::AdHoc => {}
+        }
+        if let Some(md) = self.frame.metadata.as_mut() {
+            for rn in md
+                .stacks
+                .iter_mut()
+                .flat_map(|s| s.branches.iter_mut().map(|b| &mut b.ref_name))
+            {
+                anon.apply(rn)?;
+            }
+        }
+        if let Some(ri) = self.frame.tip_ref_info.as_mut() {
+            anon.apply(&mut ri.ref_name)?;
+        }
+        if let Some(rn) = self.frame.entry_ref.as_mut() {
+            anon.apply(rn)?;
+        }
+        if let Some(rn) = self.frame.lower_bound_ref_name.as_mut() {
+            anon.apply(rn)?;
+        }
+        if let Some(t) = self.frame.target_ref.as_mut() {
+            anon.apply(&mut t.name)?;
+        }
         self.commit_graph.anonymize_refs(&mut anon)?;
+        // Re-derive the segment graph from the anonymized sources — coherent by construction
+        // with what the display will re-derive.
+        self.segment_graph = crate::workspace::SegmentGraph::from_stacks(&self.derive_reconciled());
         Ok(self)
     }
 }
@@ -207,6 +251,41 @@ impl crate::CommitGraph {
         }
         if let Some(rn) = self.entrypoint_ref_mut() {
             anon.apply(rn)?;
+        }
+        for seed in &mut self.seeds {
+            if let Some(rn) = seed.ref_name.as_mut() {
+                anon.apply(rn)?;
+            }
+            if let Some(crate::SegmentMetadata::Workspace(ws)) = seed.metadata.as_mut() {
+                for rn in ws
+                    .stacks
+                    .iter_mut()
+                    .flat_map(|s| s.branches.iter_mut().map(|b| &mut b.ref_name))
+                {
+                    anon.apply(rn)?;
+                }
+            }
+        }
+        // The stored layout speaks names throughout — groups, facts, head refs, and the
+        // declared stack partition all feed re-derivations and must alias coherently.
+        if let Some(layout) = self.layout.as_mut() {
+            for group in layout.groups.iter_mut().flat_map(|(_, groups)| groups) {
+                for rn in &mut group.members {
+                    anon.apply(rn)?;
+                }
+                if let Some(rn) = group.attach.as_mut() {
+                    anon.apply(rn)?;
+                }
+            }
+            for (rn, _) in &mut layout.facts {
+                anon.apply(rn)?;
+            }
+            for rn in &mut layout.head_refs {
+                anon.apply(rn)?;
+            }
+            for rn in layout.stacks.iter_mut().flat_map(|s| &mut s.branches) {
+                anon.apply(rn)?;
+            }
         }
         self.rebuild_by_ref();
         Ok(())

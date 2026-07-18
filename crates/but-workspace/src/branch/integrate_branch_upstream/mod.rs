@@ -7,6 +7,7 @@ use anyhow::{Result, bail};
 use but_core::{RefMetadata, commit::Headers};
 use but_rebase::graph_rebase::{
     Editor, LookupStep, SuccessfulRebase, ToSelector,
+    mutate::Reconnect,
     selector::{SelectorSet, StepRange},
 };
 
@@ -184,7 +185,12 @@ pub fn integrate_branch_with_steps<'meta, M: RefMetadata>(
     .collect::<Result<Vec<_>>>()?;
 
     // Step 3: Disconnect the segment, isolating it so that we can freely manipulate it.
-    editor.disconnect_range_from(range, children_to_disconnect, parents_to_disconnect, true)?;
+    editor.disconnect_range_from(
+        range,
+        children_to_disconnect,
+        parents_to_disconnect,
+        Reconnect::Skip,
+    )?;
 
     // Step 4: Based on the prepared steps, we rebuild the chain.
     let new_segment_delimiter =

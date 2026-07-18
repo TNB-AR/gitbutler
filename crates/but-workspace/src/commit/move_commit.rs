@@ -4,7 +4,7 @@ use anyhow::bail;
 use but_core::RefMetadata;
 use but_rebase::graph_rebase::{
     Editor, LookupStep as _, SuccessfulRebase, ToCommitSelector, ToSelector,
-    mutate::InsertSide,
+    mutate::{InsertSide, Reconnect},
     selector::{RelativeTo, SelectorSet, StepRange},
 };
 
@@ -109,7 +109,7 @@ pub fn move_commit_no_rebase<'meta, M: RefMetadata>(
         commit_range.clone(),
         SelectorSet::All,
         parent_to_disconnect,
-        false,
+        Reconnect::Heal,
     )?;
 
     // Step 3: Insert

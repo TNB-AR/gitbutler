@@ -180,7 +180,8 @@ Single commit, target, no ws commit, but ws-reference
             stack_id_for_name,
             None,
         )
-        .expect("it updates the workspace metadata legitimate the new ref at base");
+        .expect("it updates the workspace metadata legitimate the new ref at base")
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -206,7 +207,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -219,7 +221,7 @@ Single commit, target, no ws commit, but ws-reference
 "#]]
         );
 
-        // Idempotency
+        // Idempotency: `None` = nothing changed, the input workspace stays current.
         let ws = but_workspace::branch::create_reference(
             b_ref,
             None, /* anchor */
@@ -228,7 +230,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .unwrap_or(ws);
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -253,7 +256,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -279,7 +283,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -368,7 +373,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         // It handles this special case, by creating the necessary workspace metadata
         // if for some reason (like manual building) it's not set.
         snapbox::assert_data_eq!(
@@ -396,7 +402,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
@@ -425,7 +432,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         // Note how 'Above' *a commit* means directly above, not on top of everything.
         // And as there are now two references on one commit, and one has metadata, the other one doesn't,
@@ -457,7 +465,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         // And 'A' is back, with the desired order correctly restored.
         snapbox::assert_data_eq!(
@@ -488,7 +497,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         // *Above a segment means what one would expect though.
         snapbox::assert_data_eq!(
@@ -519,7 +529,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
@@ -550,19 +561,20 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-└── ≡📙:above-A on bce0c5e {4cf}
+└── ≡📙:above-A-commit on bce0c5e {4cf}
+    ├── 📙:above-A-commit
+    ├── 📙:below-A
     ├── 📙:above-A
     ├── 📙:A
-    ├── 📙:above-A-commit
     │   └── ·43f9472 (🏘️)
     ├── 📙:below-A-commit
     ├── 📙:above-bottom
-    ├── 📙:below-A
     │   └── ·6fdab32 (🏘️)
     └── 📙:bottom
 
@@ -579,19 +591,20 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-├── ≡📙:above-A on bce0c5e {4cf}
+├── ≡📙:above-A-commit on bce0c5e {4cf}
+│   ├── 📙:above-A-commit
+│   ├── 📙:below-A
 │   ├── 📙:above-A
 │   ├── 📙:A
-│   ├── 📙:above-A-commit
 │   │   └── ·43f9472 (🏘️)
 │   ├── 📙:below-A-commit
 │   ├── 📙:above-bottom
-│   ├── 📙:below-A
 │   │   └── ·6fdab32 (🏘️)
 │   └── 📙:bottom
 └── ≡📙:B on bce0c5e {42}
@@ -613,19 +626,20 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-├── ≡📙:above-A on bce0c5e {4cf}
+├── ≡📙:above-A-commit on bce0c5e {4cf}
+│   ├── 📙:above-A-commit
+│   ├── 📙:below-A
 │   ├── 📙:above-A
 │   ├── 📙:A
-│   ├── 📙:above-A-commit
 │   │   └── ·43f9472 (🏘️)
 │   ├── 📙:below-A-commit
 │   ├── 📙:above-bottom
-│   ├── 📙:below-A
 │   │   └── ·6fdab32 (🏘️)
 │   └── 📙:bottom
 └── ≡📙:above-B on bce0c5e {42}
@@ -650,19 +664,20 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-├── ≡📙:above-A on bce0c5e {4cf}
+├── ≡📙:above-A-commit on bce0c5e {4cf}
+│   ├── 📙:above-A-commit
+│   ├── 📙:below-A
 │   ├── 📙:above-A
 │   ├── 📙:A
-│   ├── 📙:above-A-commit
 │   │   └── ·43f9472 (🏘️)
 │   ├── 📙:below-A-commit
 │   ├── 📙:above-bottom
-│   ├── 📙:below-A
 │   │   └── ·6fdab32 (🏘️)
 │   └── 📙:bottom
 └── ≡📙:above-B on bce0c5e {42}
@@ -683,14 +698,14 @@ Single commit, target, no ws commit, but ws-reference
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-├── ≡📙:above-A on bce0c5e {4cf}
+├── ≡📙:above-A-commit on bce0c5e {4cf}
+│   ├── 📙:above-A-commit
+│   ├── 📙:below-A
 │   ├── 📙:above-A
 │   ├── 📙:A
-│   ├── 📙:above-A-commit
 │   │   └── ·43f9472 (🏘️)
 │   ├── 📙:below-A-commit
 │   ├── 📙:above-bottom
-│   ├── 📙:below-A
 │   │   └── ·6fdab32 (🏘️)
 │   └── 📙:bottom
 └── ≡📙:above-B on bce0c5e {42}
@@ -705,8 +720,8 @@ Single commit, target, no ws commit, but ws-reference
             visualize_commit_graph_all(&repo)?,
             snapbox::str![[r#"
 * 05240ea (HEAD -> gitbutler/workspace) GitButler Workspace Commit
-* 43f9472 (above-A-commit, above-A, A) A2
-* 6fdab32 (below-A-commit, below-A, above-bottom) A1
+* 43f9472 (below-A, above-A-commit, above-A, A) A2
+* 6fdab32 (below-A-commit, above-bottom) A1
 * bce0c5e (origin/main, main, bottom, below-B, above-B, B) M2
 * 3183e43 M1
 
@@ -759,7 +774,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -785,7 +801,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         // We can create branches that would be on the base.
         // There are
@@ -816,7 +833,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         // Note how 'Above' *a commit* means directly above, not on top of everything.
         snapbox::assert_data_eq!(
@@ -847,7 +865,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         // *Above a segment means what one would expect though.
         snapbox::assert_data_eq!(
@@ -880,7 +899,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
@@ -910,7 +930,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
@@ -941,7 +962,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -970,7 +992,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1004,7 +1027,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1041,7 +1065,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1148,7 +1173,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
@@ -1215,7 +1241,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1244,7 +1271,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
@@ -1309,7 +1337,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1338,7 +1367,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1366,7 +1396,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1395,7 +1426,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1424,7 +1456,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1500,7 +1533,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1524,7 +1558,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1548,7 +1583,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1631,7 +1667,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -1682,7 +1719,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -2042,7 +2080,8 @@ Single commit, target, no ws commit, but ws-reference
             .resolved_target_commit_id()
             .expect("the scenario sets a default target");
         assert!(
-            ws.find_owner_indexes_by_commit_id(target_id).is_none(),
+            but_graph::workspace::find_commit_and_containers_in(&ws.display_stacks()?, target_id)
+                .is_none(),
             "the target tip must be outside the workspace for this repro"
         );
 
@@ -2057,7 +2096,8 @@ Single commit, target, no ws commit, but ws-reference
             &mut meta,
             stack_id_for_name,
             None,
-        )?;
+        )?
+        .expect("the workspace changed");
 
         // `new-branch` emerges as its own standalone stack/segment, based at M1.
         snapbox::assert_data_eq!(
@@ -2163,12 +2203,10 @@ fn errors() -> anyhow::Result<()> {
         )
         .unwrap_err();
         let err = err.to_string();
+        // Reading the reconciled view, the base IS main's own commit, so anchoring below it is
+        // refused as "belongs to another branch" — not the old display-artifact "not in workspace".
         assert!(
-            matches!(
-                err.as_str(),
-                "Cannot create reference on unborn branch"
-                    | "Commit c166d42d4ef2e5e742d33554d03805cfb0b24d11 isn't part of the workspace"
-            ),
+            err.contains("already belongs to another branch"),
             "workspace base cannot be used as a below-anchor: {err}"
         );
         assert!(
@@ -2315,16 +2353,13 @@ fn errors() -> anyhow::Result<()> {
     );
 
     let (a_id, _a_ref_owned) = id_at(&repo, "A");
-    for (anchor, expected_err) in [
-        (
-            Anchor::at_segment(a_ref, Below),
-            "Cannot create reference on unborn branch",
-        ),
-        (
-            Anchor::at_id(a_id, Below),
-            "Commit 89cc2d303514654e9cab2d05b9af08b420a740c1 isn't part of the workspace",
-        ),
-    ] {
+    // A's base (89cc2d) sits outside the workspace but IS in the reconciled view, owned by A's
+    // stack. Reading the view, both anchors resolve there and are refused as belonging to another
+    // branch — the message is now CONSISTENT across at_segment and at_id (it used to differ).
+    let expected_err = "Branch 'does-not-matter' cannot be created: the target commit \
+         (89cc2d303514654e9cab2d05b9af08b420a740c1) already belongs to another branch in the \
+         workspace. Each commit can only belong to one branch at a time.";
+    for anchor in [Anchor::at_segment(a_ref, Below), Anchor::at_id(a_id, Below)] {
         let err = but_workspace::branch::create_reference(
             new_name,
             anchor.clone(),
@@ -2338,7 +2373,7 @@ fn errors() -> anyhow::Result<()> {
         assert_eq!(
             err.to_string(),
             expected_err,
-            "{anchor:?}: TODO: make these error messages consistent, and one might argue that this makes it hard to create refs on such bases."
+            "{anchor:?}: creating a ref below A's out-of-workspace base is refused as belonging to another branch"
         );
         assert!(meta.branch(a_ref)?.is_default(), "no data was stored");
         assert_ne!(
@@ -2394,7 +2429,8 @@ fn journey_with_commits() -> anyhow::Result<()> {
         stack_id_for_name,
         None,
     )
-    .expect("this works as the branch is unique");
+    .expect("this works as the branch is unique")
+    .expect("the workspace changed");
 
     // We always add metadata to new branches.
     snapbox::assert_data_eq!(
@@ -2432,7 +2468,8 @@ fn journey_with_commits() -> anyhow::Result<()> {
         &mut meta,
         stack_id_for_name,
         None,
-    )?;
+    )?
+    .expect("the workspace changed");
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -2456,7 +2493,8 @@ fn journey_with_commits() -> anyhow::Result<()> {
         &mut meta,
         stack_id_for_name,
         None,
-    )?;
+    )?
+    .expect("the workspace changed");
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -2489,7 +2527,7 @@ fn journey_with_commits() -> anyhow::Result<()> {
         "Branch 'another-below-main' cannot be created: the target commit (12995d783f3ac841a1774e9433ee8e4c1edac576) already belongs to another branch in the workspace. Each commit can only belong to one branch at a time."
     );
 
-    // branch already exists in the workspace, all good.
+    // branch already exists in the workspace, all good: `None` = nothing changed.
     let main_ref = r("refs/heads/main");
     let ws = but_workspace::branch::create_reference(
         main_ref,
@@ -2499,7 +2537,8 @@ fn journey_with_commits() -> anyhow::Result<()> {
         &mut meta,
         stack_id_for_name,
         None,
-    )?;
+    )?
+    .unwrap_or(ws);
 
     assert!(
         meta.branch(main_ref)?.is_default(),
@@ -2533,7 +2572,8 @@ fn journey_with_commits() -> anyhow::Result<()> {
         &mut meta,
         stack_id_for_name,
         None,
-    )?;
+    )?
+    .expect("the workspace changed");
 
     assert!(
         !meta.branch(main_ref)?.is_default(),
@@ -2592,7 +2632,8 @@ fn existing_git_ref_inside_workspace_is_adopted() -> anyhow::Result<()> {
         &mut meta,
         stack_id_for_name,
         None,
-    )?;
+    )?
+    .expect("the workspace changed");
 
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -2657,7 +2698,8 @@ fn journey_anon_workspace() -> anyhow::Result<()> {
         &mut meta,
         stack_id_for_name,
         None,
-    )?;
+    )?
+    .expect("the workspace changed");
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -2702,7 +2744,8 @@ fn journey_anon_workspace() -> anyhow::Result<()> {
         &mut meta,
         stack_id_for_name,
         None,
-    )?;
+    )?
+    .expect("the workspace changed");
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -2809,7 +2852,7 @@ mod ad_hoc_at_reference {
             stack_id_for_name,
             None,
         )?
-        .into_owned())
+        .expect("the workspace changed"))
     }
 
     /// Assert the durable tip-to-base order recorded for the chain containing `anchor`.
@@ -3212,4 +3255,66 @@ mod ad_hoc_at_reference {
         );
         Ok(())
     }
+}
+
+/// PIN: an anchorless `create_reference` whose name already exists as a branch that names a
+/// segment in the GRAPH (here: resting below the workspace base, i.e. integrated history)
+/// but is NOT a workspace member. This is the divergence class between "names a segment in
+/// the graph" (`RefLayout` fact) and "is in the workspace" (reconciled membership): the
+/// idempotency guard must NOT treat it as already-present, or the call becomes a silent
+/// no-op instead of whatever integration the operation decides on.
+#[test]
+fn create_reference_no_anchor_for_existing_below_base_branch_is_not_a_noop() -> anyhow::Result<()> {
+    let (_tmp, ws, repo, mut meta, _desc) =
+        crate::ref_info::with_workspace_commit::utils::named_writable_scenario_with_description_and_graph(
+            "single-branch-4-commits-more-branches",
+            |meta| {
+                crate::ref_info::with_workspace_commit::utils::add_stack_with_segments(
+                    meta,
+                    0,
+                    "A",
+                    crate::ref_info::with_workspace_commit::utils::StackState::InWorkspace,
+                    &[],
+                );
+            },
+        )?;
+    // M1 sits below the base (M2): in the graph, outside the workspace.
+    let below_base = repo.rev_parse_single("3183e43")?.detach();
+    repo.reference(
+        "refs/heads/old-integrated",
+        below_base,
+        PreviousValue::Any,
+        "test: pre-existing branch below the base",
+    )?;
+    let ws = ws.redo(&repo, &meta, Default::default())?;
+    let name = r("refs/heads/old-integrated");
+
+    // The divergence exists: the layout names a segment for it, membership says no.
+    let layout_names_segment = ws
+        .commit_graph()
+        .layout()
+        .and_then(|l| l.facts_of(name))
+        .is_some_and(|f| f.names_segment);
+    let is_member = ws.find_segment_and_stack_by_refname(name).is_some();
+    assert!(
+        layout_names_segment,
+        "the below-base branch names a segment in the graph"
+    );
+    assert!(!is_member, "but it is NOT a workspace member");
+
+    // And the operation must not silently no-op on it.
+    let outcome = but_workspace::branch::create_reference(
+        name,
+        None,
+        &repo,
+        &ws,
+        &mut meta,
+        stack_id_for_name,
+        None,
+    );
+    match outcome {
+        Ok(None) => panic!("must not be treated as already-present (silent no-op)"),
+        Ok(Some(_)) | Err(_) => {}
+    }
+    Ok(())
 }

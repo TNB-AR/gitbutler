@@ -26,7 +26,7 @@ impl<'meta, M: RefMetadata> Editor<'meta, M> {
     /// outstanding selector stay valid across the rebase.
     #[tracing::instrument(level = "debug", skip_all, err(Debug))]
     pub fn rebase(self) -> Result<SuccessfulRebase<'meta, M>> {
-        crate::graph_rebase::positions::debug_assert_positions_total(&self.graph);
+        crate::graph_rebase::positions::assert_positions_total(&self.graph)?;
 
         let mut graph = self.graph;
         let mut history = self.history;

@@ -745,9 +745,9 @@ fn move_commit_to_empty_branch() -> anyhow::Result<()> {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-*   6d5c23e (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   e16ce30 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
-| * 09d8e52 (B) A
+* | 09d8e52 (B) A
 |/  
 * 85efbe4 (origin/main, main, A) M
 
@@ -759,11 +759,11 @@ fn move_commit_to_empty_branch() -> anyhow::Result<()> {
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
-├── ≡📙:A on 85efbe4 {1}
-│   └── 📙:A
-└── ≡📙:B on 85efbe4 {2}
-    └── 📙:B
-        └── ·09d8e52 (🏘️)
+├── ≡📙:B on 85efbe4 {2}
+│   └── 📙:B
+│       └── ·09d8e52 (🏘️)
+└── ≡📙:A on 85efbe4 {1}
+    └── 📙:A
 
 "#]]
     );

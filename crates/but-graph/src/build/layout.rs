@@ -60,14 +60,48 @@ pub(super) fn derive_ref_layout(data: &SegmentData, cg: &crate::CommitGraph) -> 
         .entrypoint_sidx
         .context("BUG: must always set the entrypoint")?;
     let workspace_commit_id = data.entrypoint.filter(|&id| cg.is_managed_ws_commit(id));
-    Ok(positions_from_segments(
+    let layout = positions_from_segments(
         cg,
         &data.segments,
         &data.extra_refs,
         &data.parent_ordered_targets(cg),
         entrypoint_sidx,
         workspace_commit_id,
-    ))
+    );
+    // THE MERGE FORMULA: the stored workspace parents are the real parent array plus
+    // the chain structure's deliberately minted parents — nothing else. Two properties,
+    // asserted: (1) the real parents keep their relative order (a no-op materialize
+    // must reproduce the merge, and operations must not reorder lanes), and (2) as a
+    // multiset the list is exactly real + minted (the wiring the list is derived FROM
+    // cannot grow or shrink the merge on its own). The weave position of a minted parent
+    // is shape-dependent and deliberately not pinned.
+    #[cfg(debug_assertions)]
+    if let Some(materialized) = &layout.materialized_ws_parents {
+        let real: Vec<gix::ObjectId> = cg.connected_parents(materialized.commit).collect();
+        let mut expected: Vec<gix::ObjectId> = real
+            .iter()
+            .copied()
+            .chain(data.minted_ws_parents.iter().map(|&(_, anchor)| anchor))
+            .collect();
+        let mut stored = materialized.parents.clone();
+        expected.sort_unstable();
+        stored.sort_unstable();
+        debug_assert_eq!(
+            stored, expected,
+            "the merge formula: stored ws parents = real parents + deliberate minted \
+             (real: {real:?}, minted: {:?}, stored: {:?})",
+            data.minted_ws_parents, materialized.parents
+        );
+        let mut remaining = materialized.parents.iter();
+        debug_assert!(
+            real.iter()
+                .all(|parent| remaining.by_ref().any(|stored| stored == parent)),
+            "the merge formula: real parents keep their relative order \
+             (real: {real:?}, stored: {:?})",
+            materialized.parents
+        );
+    }
+    Ok(layout)
 }
 
 /// Compute the layout from the segments: per-segment entry rows (segment ref, then per commit its refs then the

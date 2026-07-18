@@ -86,17 +86,16 @@ fn operation_denied_on_improper_workspace() -> anyhow::Result<()> {
     );
 
     let branch_b = r("refs/heads/B");
-    let err = but_workspace::branch::apply(branch_b, ws.clone(), &repo, &mut meta, apply_options())
-        .unwrap_err();
+    let err =
+        but_workspace::branch::apply(branch_b, &ws, &repo, &mut meta, apply_options()).unwrap_err();
     assert_eq!(
         err.to_string(),
         "Refusing to work on workspace whose workspace commit isn't at the top",
         "cannot apply on a workspace that isn't proper"
     );
 
-    let err =
-        but_workspace::branch::apply(r("HEAD"), ws.clone(), &repo, &mut meta, apply_options())
-            .unwrap_err();
+    let err = but_workspace::branch::apply(r("HEAD"), &ws, &repo, &mut meta, apply_options())
+        .unwrap_err();
     assert_eq!(
         err.to_string(),
         "Refusing to apply symbolic ref 'HEAD' due to potential ambiguity"
@@ -224,7 +223,7 @@ fn unapply_branch_from_named_ad_hoc_workspace_affects_metadata() -> anyhow::Resu
         stack_id_for_name,
         None,
     )?
-    .into_owned();
+    .expect("the workspace changed");
     // creating a branch in the ad-hoc workspace gives unapply a visible segment to reject, it has its own ref-metadata
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -252,7 +251,7 @@ fn unapply_branch_from_named_ad_hoc_workspace_affects_metadata() -> anyhow::Resu
 
     // on-A1 no longer has a metadata-disambiguated segment
     snapbox::assert_data_eq!(
-        graph_workspace(&out.workspace).to_string(),
+        graph_workspace(&out.display_workspace()?).to_string(),
         snapbox::str![[r#"
 ⌂:A2 <> ✓!
 └── ≡:A2 {1}
@@ -309,7 +308,7 @@ fn ws_ref_no_ws_commit_two_virtual_stacks_on_same_commit_apply_dependent_first()
 
     // Put "B" into the workspace, even though it's the dependent branch of A.
     let out =
-        but_workspace::branch::apply(r("refs/heads/B"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/B"), &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -321,7 +320,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -334,10 +333,10 @@ Outcome {
 
     // Applying A is always a new stack then.
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     // the workspace ref still points to the base e5d0542
     snapbox::assert_data_eq!(
-        graph_workspace(&out.workspace).to_string(),
+        graph_workspace(&out.display_workspace()?).to_string(),
         snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓! on e5d0542
 ├── ≡📙:B on e5d0542 {1}
@@ -357,7 +356,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     let out = but_workspace::branch::unapply(
         r("refs/heads/A"),
         &ws,
@@ -375,7 +374,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // A was removed with metadata only
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -407,7 +406,7 @@ Outcome {
     );
     // no stacks are left
     snapbox::assert_data_eq!(
-        graph_workspace(&out.workspace).to_string(),
+        graph_workspace(&out.display_workspace()?).to_string(),
         snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓! on e5d0542
 
@@ -440,7 +439,11 @@ mod workspace_disposition {
             unapply_options_with(WorkspaceDisposition::KeepWorkspaceCommit),
         )?;
         assert!(
-            out.workspace.kind.has_managed_commit(),
+            out.workspace
+                .as_ref()
+                .expect("workspace changed")
+                .kind
+                .has_managed_commit(),
             "KeepWorkspaceCommit must preserve the checked-out managed workspace commit"
         );
         assert!(
@@ -449,7 +452,7 @@ mod workspace_disposition {
         );
         // A was removed
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
 ├── ≡📙:virtual-base on 85efbe4 {1}
@@ -465,7 +468,7 @@ mod workspace_disposition {
             visualize_commit_graph_all(&repo)?,
             snapbox::str![[r#"
 * 09d8e52 (A) A
-| * 3b77768 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| * 78957ac (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |/| 
 | * c813d8d (B) B
 |/  
@@ -494,7 +497,7 @@ mod workspace_disposition {
         );
         // There still is a workspace merge commit, we have two stacks, virtual or not
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
 ├── ≡📙:virtual-base on 85efbe4 {1}
@@ -510,7 +513,7 @@ mod workspace_disposition {
             visualize_commit_graph_all(&repo)?,
             snapbox::str![[r#"
 * 09d8e52 (A) A
-| * 3b77768 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| * 78957ac (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |/| 
 | * c813d8d (B) B
 |/  
@@ -566,7 +569,7 @@ Outcome {
         );
         // the projection is the checked-out remaining stack
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 ⌂:B[🌳] <> ✓refs/remotes/origin/main on 85efbe4
 └── ≡📙:B[🌳] on 85efbe4 {1}
@@ -604,7 +607,11 @@ Outcome {
 "#]]
         );
         assert!(
-            out.workspace.kind.has_managed_commit(),
+            out.workspace
+                .as_ref()
+                .expect("workspace changed")
+                .kind
+                .has_managed_commit(),
             "compatibility disposition should preserve the managed workspace commit when the workspace ref remains"
         );
         assert!(
@@ -612,7 +619,7 @@ Outcome {
             "compatibility disposition should rebuild the workspace merge instead of collapsing the ref to the last real stack"
         );
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
 ├── ≡📙:A on 85efbe4 {2}
@@ -627,7 +634,7 @@ Outcome {
         snapbox::assert_data_eq!(
             visualize_commit_graph_all(&repo)?,
             snapbox::str![[r#"
-*   483c8bd (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   3147679 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 | * c813d8d (B) B
 * | 09d8e52 (A) A
@@ -655,9 +662,14 @@ Outcome {
             project_meta(&meta),
             standard_traversal_options(),
         )?;
-        let out =
-            but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
-        let ws = out.workspace;
+        let out = but_workspace::branch::apply(
+            r("refs/heads/A"),
+            &ws,
+            &repo,
+            &mut meta,
+            apply_options(),
+        )?;
+        let ws = out.display_workspace()?;
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
             snapbox::str![[r#"
@@ -691,7 +703,7 @@ Outcome {
 
         // everything is dissolved, there is no gitbutler/workspace ref either
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 ⌂:main[🌳] <> ✓refs/remotes/origin/main on e5d0542
 └── ≡:main[🌳] <> origin/main {1}
@@ -717,9 +729,14 @@ Outcome {
             project_meta(&meta),
             standard_traversal_options(),
         )?;
-        let out =
-            but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
-        let ws = out.workspace;
+        let out = but_workspace::branch::apply(
+            r("refs/heads/A"),
+            &ws,
+            &repo,
+            &mut meta,
+            apply_options(),
+        )?;
+        let ws = out.display_workspace()?;
 
         let out = but_workspace::branch::unapply(
             r("refs/heads/A"),
@@ -745,7 +762,7 @@ Outcome {
 
         // the compatibility mode still removes the whole workspace when it can
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 ⌂:main[🌳] <> ✓refs/remotes/origin/main on e5d0542
 └── ≡:main[🌳] <> origin/main {1}
@@ -771,9 +788,14 @@ Outcome {
             project_meta(&meta),
             standard_traversal_options(),
         )?;
-        let out =
-            but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
-        let ws = out.workspace;
+        let out = but_workspace::branch::apply(
+            r("refs/heads/A"),
+            &ws,
+            &repo,
+            &mut meta,
+            apply_options(),
+        )?;
+        let ws = out.display_workspace()?;
         // the workspace ref is checked out
         snapbox::assert_data_eq!(
             graph_workspace(&ws).to_string(),
@@ -864,7 +886,7 @@ Outcome {
         );
         // the workspace is empty
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
 
@@ -876,7 +898,7 @@ Outcome {
             snapbox::str![[r#"
 * d69fe94 (B) B
 * 09d8e52 (A) A
-| * bde8ed6 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| * 0683d87 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |/  
 * 85efbe4 (origin/main, main) M
 
@@ -997,7 +1019,7 @@ fn main_with_advanced_remote_tracking_branch() -> anyhow::Result<()> {
     // We cannot apply remote tracking branches directly, but it resolves automatically to local tracking branches.
     let out = but_workspace::branch::apply(
         r("refs/remotes/origin/main"),
-        ws.clone(),
+        &ws,
         &repo,
         &mut meta,
         apply_options(),
@@ -1018,7 +1040,7 @@ Outcome {
     // Set up an automatic tracking of origin/feature, as remote tracking branches can't be in the workspace.
     let out = but_workspace::branch::apply(
         r("refs/remotes/origin/feature"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         apply_options(),
@@ -1034,7 +1056,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     // both branches, main and feature, are available in the newly created workspace ref.
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -1053,7 +1075,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* 3d23cfb (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+* 6e8385b (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 * 6b40b15 (origin/feature, feature) without-local-tracking
 | * 552e7dc (origin/main) only-on-remote
 |/  
@@ -1104,8 +1126,8 @@ fn unapply_remotely_tracked_tip_of_multi_segment_stack_can_delete_workspace_ref(
     }
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/B"), ws, &repo, &mut meta, apply_options())?;
-    let ws = out.workspace;
+        but_workspace::branch::apply(r("refs/heads/B"), &ws, &repo, &mut meta, apply_options())?;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -1153,7 +1175,7 @@ Outcome {
 
     // an ad-hoc workspace remains on the target's local tracking branch
     snapbox::assert_data_eq!(
-        graph_workspace(&out.workspace).to_string(),
+        graph_workspace(&out.display_workspace()?).to_string(),
         snapbox::str![[r#"
 ⌂:main[🌳] <> ✓refs/remotes/origin/main on 85efbe4
 └── ≡:main[🌳] <> origin/main {1}
@@ -1209,7 +1231,7 @@ fn workspace_with_out_of_ws_ref_and_anon_stack() -> anyhow::Result<()> {
 
     let out = but_workspace::branch::apply(
         r("refs/heads/feature"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         apply_options(),
@@ -1227,7 +1249,7 @@ Outcome {
     );
 
     snapbox::assert_data_eq!(
-        graph_workspace(&out.workspace).to_string(),
+        graph_workspace(&out.display_workspace()?).to_string(),
         snapbox::str![[r#"
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
 ├── ≡📙:outside on 3183e43 {1}
@@ -1270,7 +1292,7 @@ fn ws_ref_no_ws_commit_two_stacks_on_same_commit() -> anyhow::Result<()> {
 
     // Put "A" into the workspace, yielding a single branch.
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -1282,7 +1304,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -1302,7 +1324,7 @@ Outcome {
     );
 
     let branch_b = r("refs/heads/B");
-    let out = but_workspace::branch::apply(branch_b, ws, &repo, &mut meta, apply_options())?;
+    let out = but_workspace::branch::apply(branch_b, &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -1316,7 +1338,7 @@ Outcome {
     );
     // Note how it will create a new stack (to keep it simple),
     // in theory we could also add B as dependent branch.
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -1339,7 +1361,7 @@ Outcome {
     );
 
     let out = but_workspace::branch::unapply(branch_b, &ws, &repo, &mut meta, unapply_options())?;
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -1365,7 +1387,7 @@ Outcome {
         unapply_options(),
     )?;
     snapbox::assert_data_eq!(
-        graph_workspace(&out.workspace).to_string(),
+        graph_workspace(&out.display_workspace()?).to_string(),
         snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓! on e5d0542
 
@@ -1416,7 +1438,7 @@ fn unapply_natural_stack_with_partial_workspace_metadata() -> anyhow::Result<()>
 
     // A is removed and B is left
     snapbox::assert_data_eq!(
-        graph_workspace(&out.workspace).to_string(),
+        graph_workspace(&out.display_workspace()?).to_string(),
         snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
 └── ≡📙:B on 85efbe4 {1}
@@ -1426,7 +1448,13 @@ fn unapply_natural_stack_with_partial_workspace_metadata() -> anyhow::Result<()>
 "#]]
     );
 
-    let ws_md = out.workspace.metadata.as_ref().expect("present");
+    let ws_md = out
+        .workspace
+        .as_ref()
+        .expect("workspace changed")
+        .metadata
+        .as_ref()
+        .expect("present");
     // the extra segment is still present in metadata to help with stack identities
     snapbox::assert_data_eq!(
         &ws_md.to_debug(),
@@ -1493,11 +1521,11 @@ fn unapply_natural_stack_branch_without_workspace_metadata() -> anyhow::Result<(
 
     // C was unapplied, and the workspace commit removed
     snapbox::assert_data_eq!(
-        graph_workspace_determinisitcally(&out.workspace).to_string(),
+        graph_workspace_determinisitcally(&out.display_workspace()?).to_string(),
         snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 893d602
-└── ≡📙:A on 893d602 {1}
-    └── 📙:A
+└── ≡:A on 893d602
+    └── :A
         └── ·26e45af (🏘️)
 
 "#]]
@@ -1515,39 +1543,20 @@ fn unapply_natural_stack_branch_without_workspace_metadata() -> anyhow::Result<(
 "#]]
     );
 
-    let ws_md = out.workspace.metadata.as_ref().expect("present");
+    let ws_md = out
+        .workspace
+        .as_ref()
+        .expect("workspace changed")
+        .metadata
+        .as_ref()
+        .expect("present");
     // the metadata matches the real workspace now
     snapbox::assert_data_eq!(
         sanitize_uuids_and_timestamps(format!("{ws_md:#?}")),
         snapbox::str![[r#"
 Workspace {
     ref_info: RefInfo { created_at: "2023-01-31 14:55:57 +0000", updated_at: None },
-    stacks: [
-        WorkspaceStack {
-            id: 1,
-            branches: [
-                WorkspaceStackBranch {
-                    ref_name: "refs/heads/A",
-                    archived: false,
-                },
-            ],
-            workspacecommit_relation: Merged,
-        },
-        WorkspaceStack {
-            id: 2,
-            branches: [
-                WorkspaceStackBranch {
-                    ref_name: "refs/heads/C",
-                    archived: false,
-                },
-                WorkspaceStackBranch {
-                    ref_name: "refs/heads/B",
-                    archived: false,
-                },
-            ],
-            workspacecommit_relation: Outside,
-        },
-    ],
+    stacks: [],
     target_ref: "refs/remotes/origin/main",
     target_commit_id: Sha1(893d6025c9de29ed75369de967e52a1154bbf0ee),
     push_remote: None,
@@ -1607,7 +1616,7 @@ fn no_ws_ref_no_ws_commit_two_stacks_on_same_commit_ad_hoc_workspace_without_tar
     // Put "A" into the workspace, creating the workspace ref, but never put a branch related to the target in as well,
     // which is currently checked out with `main`.
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -1621,7 +1630,7 @@ Outcome {
     );
 
     snapbox::assert_data_eq!(
-        graph_workspace(&out.workspace).to_string(),
+        graph_workspace(&out.display_workspace()?).to_string(),
         snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓! on e5d0542
 ├── ≡📙:main on e5d0542 {1a5}
@@ -1642,10 +1651,10 @@ Outcome {
     );
 
     // Thread the post-apply workspace into the next apply instead of reusing the stale projection.
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     let out = but_workspace::branch::apply(
         r("refs/heads/B"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         but_workspace::branch::apply::Options {
@@ -1665,7 +1674,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -1710,7 +1719,7 @@ Outcome {
 
     let out = but_workspace::branch::apply(
         r("refs/heads/A"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         but_workspace::branch::apply::Options {
@@ -1722,13 +1731,13 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* 6277161 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+* 3e555fe (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 * e5d0542 (origin/main, main, B, A) A
 
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -1742,7 +1751,7 @@ Outcome {
 
     let out = but_workspace::branch::apply(
         r("refs/heads/B"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         but_workspace::branch::apply::Options {
@@ -1755,7 +1764,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* 5ecf7a4 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+* 664f5f7 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\
 * e5d0542 (origin/main, main, B, A) A
 
@@ -1763,7 +1772,7 @@ Outcome {
         .raw()
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -1816,7 +1825,7 @@ fn no_ws_ref_no_ws_commit_two_stacks_on_same_commit_ad_hoc_workspace_with_target
     // Put "A" into the workspace, creating the workspace ref, but never put a branch related to the target in as well,
     // which is currently checked out with `main`.
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -1829,7 +1838,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -1850,7 +1859,7 @@ Outcome {
     );
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/B"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/B"), &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -1862,7 +1871,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -1886,9 +1895,8 @@ Outcome {
 
     // Cannot put local tracking branch of target into workspace that has it configured.
     for branch in ["refs/heads/main", "refs/remotes/origin/main"] {
-        let err =
-            but_workspace::branch::apply(r(branch), ws.clone(), &repo, &mut meta, apply_options())
-                .unwrap_err();
+        let err = but_workspace::branch::apply(r(branch), &ws, &repo, &mut meta, apply_options())
+            .unwrap_err();
         assert_eq!(
             err.to_string(),
             format!("Cannot add the target '{branch}' branch to its own workspace")
@@ -1909,7 +1917,7 @@ Outcome {
         &mut meta,
         unapply_options(),
     )?;
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -1936,7 +1944,7 @@ Outcome {
     )?;
     // the target's local tracking branch is checked out
     snapbox::assert_data_eq!(
-        graph_workspace(&out.workspace).to_string(),
+        graph_workspace(&out.display_workspace()?).to_string(),
         snapbox::str![[r#"
 ⌂:main[🌳] <> ✓refs/remotes/origin/main on e5d0542
 └── ≡:main[🌳] <> origin/main {1}
@@ -1981,7 +1989,7 @@ fn apply_after_switching_out_of_workspace_drops_stale_stacks() -> anyhow::Result
     // current branch plus the applied one, while the stale `outside` stack is demoted.
     let out = but_workspace::branch::apply(
         r("refs/heads/applied"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         apply_options(),
@@ -2118,14 +2126,14 @@ fn apply_from_enclosed_adhoc_workspace_rebuilds_around_current_and_applied() -> 
     );
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/C"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/C"), &ws, &repo, &mut meta, apply_options())?;
     assert_eq!(out.status, OutcomeStatus::Applied);
     // applying C rebuilds the workspace around B and C
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
 * ccf539c (A) A
-| *   7ed2c6c (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| *   acd98b7 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 | |\  
 | | * 863775d (C) add C
 | |/  
@@ -2279,14 +2287,14 @@ fn apply_from_adhoc_checkout_rebuilds_around_current_and_applied() -> anyhow::Re
     );
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     assert_eq!(out.status, OutcomeStatus::Applied);
     // applying A rebuilds the workspace around C and A
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
 * 53c254d (B) B
-| *   dbb9910 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| *   991a38a (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 | |\  
 | | * 863775d (C) add C
 | |/  
@@ -2369,7 +2377,7 @@ fn apply_already_applied_branch_from_adhoc_checkout_excludes_other_applied_stack
         standard_traversal_options(),
     )?;
     let out =
-        but_workspace::branch::apply(r("refs/heads/C"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/C"), &ws, &repo, &mut meta, apply_options())?;
 
     assert_eq!(out.status, OutcomeStatus::Applied);
     assert_eq!(
@@ -2444,7 +2452,7 @@ fn new_workspace_exists_elsewhere_and_to_be_applied_branch_exists_there() -> any
 
     // Put "A" into the workspace, hence we want "A" and "B" in it.
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -2457,7 +2465,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     // This apply brings both branches into the existing workspace, and it's where HEAD points to.
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -2568,12 +2576,12 @@ mod unapply_checked_out {
                 Category::LocalBranch
                     .to_full_name(branch_to_apply)?
                     .as_ref(),
-                ws,
+                &ws,
                 &repo,
                 &mut meta,
                 apply_options(),
             )?;
-            ws = out.workspace;
+            ws = out.display_workspace()?;
         }
         {
             // C and B are real stacks in the managed workspace
@@ -2646,7 +2654,7 @@ Outcome {
 
         // the returned workspace is projected from the managed workspace ref
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓!
 └── ≡📙:A {1}
@@ -2693,7 +2701,7 @@ Outcome {
         );
         // the returned workspace is projected from the remaining stack
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 ⌂:A[🌳] <> ✓!
 └── ≡📙:A[🌳] {1}
@@ -2764,7 +2772,7 @@ Outcome {
         );
         // the returned workspace is projected from the managed workspace ref
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓! on e5d0542
 
@@ -2806,7 +2814,7 @@ Outcome {
 
         // the returned workspace preserves the unrelated checked-out entrypoint
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace <> ✓!
 └── ≡👉📙:B[🌳] {2}
@@ -2853,7 +2861,7 @@ Outcome {
 
         // the returned workspace is projected from the managed workspace ref
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓!
 └── ≡📙:C {43}
@@ -2905,7 +2913,7 @@ Outcome {
 
         // the returned workspace preserves the unrelated checked-out entrypoint
         snapbox::assert_data_eq!(
-            graph_workspace(&out.workspace).to_string(),
+            graph_workspace(&out.display_workspace()?).to_string(),
             snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace <> ✓!
 └── ≡👉📙:B[🌳] {42}
@@ -2968,7 +2976,7 @@ fn apply_multiple_without_target_or_metadata_or_base() -> anyhow::Result<()> {
     );
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -2981,7 +2989,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -2999,7 +3007,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-*   d87b903 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   aae2077 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 | * bf53300 (A) add A
 * | b1540e5 (main) M
@@ -3013,7 +3021,7 @@ Outcome {
     );
 
     let branch_b_rt = r("refs/remotes/origin/B");
-    let out = but_workspace::branch::apply(branch_b_rt, ws, &repo, &mut meta, apply_options())?;
+    let out = but_workspace::branch::apply(branch_b_rt, &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -3026,7 +3034,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -3047,7 +3055,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-*-.   7bcf528 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*-.   493c88c (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\ \  
 | | * 0e391b2 (origin/B, B) add B
 | * | bf53300 (A) add A
@@ -3092,7 +3100,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -3133,7 +3141,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // By default, we keep the workspace, and `main` is in there as a target is missing
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -3190,16 +3198,16 @@ fn unapply_dirty_worktree_abort_keeps_refs_and_metadata() -> anyhow::Result<()> 
 "#]]
     );
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
-    let ws = out.workspace;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
+    let ws = out.display_workspace()?;
     let out = but_workspace::branch::apply(
         r("refs/remotes/origin/B"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         apply_options(),
     )?;
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -3296,7 +3304,7 @@ fn apply_repairs_stale_outside_metadata_for_reachable_branch() -> anyhow::Result
     meta.set_workspace(&ws_md)?;
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/B"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/B"), &ws, &repo, &mut meta, apply_options())?;
     assert_eq!(
         out.status,
         OutcomeStatus::Applied,
@@ -3352,7 +3360,7 @@ fn apply_multiple_segments_of_stack_in_order_merge_if_needed() -> anyhow::Result
     // Add another stack to be sure we correctly handle the removal of existing stacks later (i.e. don't get the index wrong)
     let out = but_workspace::branch::apply(
         r("refs/heads/unrelated"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         apply_options(),
@@ -3374,7 +3382,7 @@ Outcome {
         snapbox::str![[r#"
 * f1889e7 (A2) add A2
 * 7de99e1 (A1) add A1
-| * 6848743 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| * e84c641 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 | * 53ad0c2 (unrelated) add U1
 |/  
 * 3183e43 (origin/main, main) M1
@@ -3382,10 +3390,10 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/A1"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A1"), &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -3398,7 +3406,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -3415,7 +3423,7 @@ Outcome {
 
     let out = but_workspace::branch::apply(
         r("refs/heads/A2"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         but_workspace::branch::apply::Options {
@@ -3436,7 +3444,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -3518,7 +3526,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // A2 is removed, along with A1
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -3549,7 +3557,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace.into_owned();
+    let ws = out.workspace.unwrap_or(ws);
     // nothing changed, this was a no-op
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -3582,7 +3590,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -3740,7 +3748,7 @@ fn detached_head_journey() -> anyhow::Result<()> {
     );
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/C"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/C"), &ws, &repo, &mut meta, apply_options())?;
 
     snapbox::assert_data_eq!(
         out.to_debug(),
@@ -3754,7 +3762,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     // the actual HEAD is ignored, and we only see C (instead of C + HEAD-ref)
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -3782,7 +3790,7 @@ Outcome {
     );
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/B"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/B"), &ws, &repo, &mut meta, apply_options())?;
 
     snapbox::assert_data_eq!(
         out.to_debug(),
@@ -3799,7 +3807,7 @@ Outcome {
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
 * 49d4b34 (A) A1
-| *   fdec130 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| *   19ec610 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 | |\  
 | | * f57c528 (B) B1
 | |/  
@@ -3812,7 +3820,7 @@ Outcome {
         .raw()
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -3829,7 +3837,7 @@ Outcome {
 
     let out = but_workspace::branch::apply(
         r("refs/heads/A"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         but_workspace::branch::apply::Options {
@@ -3850,7 +3858,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -3871,7 +3879,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-*-.   951ff29 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*-.   3deecc0 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\ \  
 | | * f57c528 (B) B1
 | * | aaa195b (C) C1
@@ -3901,7 +3909,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // A was removed
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -3934,7 +3942,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // B was removed
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -3965,7 +3973,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // the workspace reference remains checked out and empty because no non-stack fallback exists
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4003,17 +4011,17 @@ fn unapply_workspace_ref_without_target_checks_out_named_stack() -> anyhow::Resu
             Category::LocalBranch
                 .to_full_name(branch_to_apply)?
                 .as_ref(),
-            ws,
+            &ws,
             &repo,
             &mut meta,
             apply_options(),
         )?;
-        ws = out.workspace;
+        ws = out.display_workspace()?;
     }
 
     let out = but_workspace::branch::apply(
         r("refs/heads/A"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         but_workspace::branch::apply::Options {
@@ -4021,7 +4029,7 @@ fn unapply_workspace_ref_without_target_checks_out_named_stack() -> anyhow::Resu
             ..apply_options()
         },
     )?;
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     // the workspace has named stacks but no target ref
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4075,7 +4083,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // the projection shows the checked-out named stack
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4143,12 +4151,12 @@ fn unapply_workspace_ref_refuses_conflicted_named_stack_checkout() -> anyhow::Re
     )?;
     let out = but_workspace::branch::apply(
         r("refs/heads/tip-conflicted"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         apply_options(),
     )?;
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     // the target-less workspace can contain a conflicted named stack
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4179,7 +4187,7 @@ fn unapply_workspace_ref_refuses_conflicted_named_stack_checkout() -> anyhow::Re
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* 8a0bbba (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+* 2264576 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 * 8450331 (tag: conflicted, tip-conflicted) GitButler WIP Commit
 * a047f81 (tag: normal, main) init
 
@@ -4220,7 +4228,7 @@ fn apply_two_ambiguous_stacks_with_target_with_dependent_branch() -> anyhow::Res
 
     // Apply the dependent branch, to bring in only the dependent branch
     let out =
-        but_workspace::branch::apply(r("refs/heads/E"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/E"), &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -4233,7 +4241,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -4248,8 +4256,8 @@ Outcome {
     // Apply the former tip of the stack, to create a new stack. Note how it won't double-list the
     // other stack.
     let out =
-        but_workspace::branch::apply(r("refs/heads/C"), ws, &repo, &mut meta, apply_options())?;
-    let ws = out.workspace;
+        but_workspace::branch::apply(r("refs/heads/C"), &ws, &repo, &mut meta, apply_options())?;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -4267,7 +4275,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-*   78f3659 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   e9850d8 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 | * f084d61 (C, B, A) A2
 |/  
@@ -4283,8 +4291,8 @@ Outcome {
     // Accepting this behaviour for now as it's quite rare to have such ambiguity, even though I'd love if one day
     // for this to just work as people might intuitively want, even if that means the same commit is used multiple times.
     let out =
-        but_workspace::branch::apply(r("refs/heads/B"), ws, &repo, &mut meta, apply_options())?;
-    let ws = out.workspace;
+        but_workspace::branch::apply(r("refs/heads/B"), &ws, &repo, &mut meta, apply_options())?;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -4303,9 +4311,9 @@ Outcome {
     // This is what happens because we notice that C can't be applied as independent stack due to the graph algorithm,
     // and then it tries it a dependent stack, which should always work.
     let out =
-        but_workspace::branch::apply(r("refs/heads/C"), ws, &repo, &mut meta, apply_options())
+        but_workspace::branch::apply(r("refs/heads/C"), &ws, &repo, &mut meta, apply_options())
             .unwrap();
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -4353,7 +4361,7 @@ fn apply_two_ambiguous_stacks_with_target() -> anyhow::Result<()> {
 
     // Apply `A` first.
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -4365,7 +4373,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -4380,7 +4388,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* 773e030 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+* f6ef303 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 * f084d61 (C, B, A) A2
 * 7076dee (E, D) A1
 * 85efbe4 (origin/main, main) M
@@ -4390,7 +4398,7 @@ Outcome {
 
     // Apply `B` - the only sane way is to make it its own stack, but allow it to diverge.
     let out =
-        but_workspace::branch::apply(r("refs/heads/B"), ws, &repo, &mut meta, apply_options())
+        but_workspace::branch::apply(r("refs/heads/B"), &ws, &repo, &mut meta, apply_options())
             .expect("apply actually works");
     snapbox::assert_data_eq!(
         out.to_debug(),
@@ -4404,7 +4412,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -4420,7 +4428,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* b390237 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+* 7246aa3 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 * f084d61 (C, B, A) A2
 * 7076dee (E, D) A1
 * 85efbe4 (origin/main, main) M
@@ -4430,7 +4438,7 @@ Outcome {
 
     // What follows is a bit wonky, but for now is here to document what happens in a complex scenario.
     let out =
-        but_workspace::branch::apply(r("refs/heads/C"), ws, &repo, &mut meta, apply_options())
+        but_workspace::branch::apply(r("refs/heads/C"), &ws, &repo, &mut meta, apply_options())
             .expect("apply actually works");
     // applying C succeeds and updates the workspace metadata
     snapbox::assert_data_eq!(
@@ -4445,7 +4453,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     // C is recorded as another segment at the same tip in the B/A stack
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4464,7 +4472,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* b390237 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+* 7246aa3 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 * f084d61 (C, B, A) A2
 * 7076dee (E, D) A1
 * 85efbe4 (origin/main, main) M
@@ -4473,7 +4481,7 @@ Outcome {
     );
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/D"), ws, &repo, &mut meta, apply_options())
+        but_workspace::branch::apply(r("refs/heads/D"), &ws, &repo, &mut meta, apply_options())
             .expect("apply actually works");
     // applying D succeeds and updates the workspace metadata
     snapbox::assert_data_eq!(
@@ -4488,7 +4496,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     // D becomes a lower segment in the same projected stack, leaving E as the remaining alternate ref at that commit
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4508,7 +4516,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* b390237 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+* 7246aa3 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 * f084d61 (C, B, A) A2
 * 7076dee (E, D) A1
 * 85efbe4 (origin/main, main) M
@@ -4517,7 +4525,7 @@ Outcome {
     );
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/E"), ws, &repo, &mut meta, apply_options())
+        but_workspace::branch::apply(r("refs/heads/E"), &ws, &repo, &mut meta, apply_options())
             .expect("apply actually works");
     // applying E forces the lower same-commit branch pair into its own stack
     snapbox::assert_data_eq!(
@@ -4532,7 +4540,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     // applying all ambiguous dependent branches ends with B/C/A and E/D split into two stacks
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4554,7 +4562,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-*   2c125a1 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+*   139346d (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |\  
 * | f084d61 (C, B, A) A2
 |/  
@@ -4589,7 +4597,7 @@ Outcome {
         "legacy mode should rebuild the workspace commit after removing E/D"
     );
 
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // after unapplying E, legacy mode keeps a workspace commit
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4609,7 +4617,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* b390237 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+* f1a206b (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 * f084d61 (C, B, A) A2
 * 7076dee (E, D) A1
 * 85efbe4 (origin/main, main) M
@@ -4637,7 +4645,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // the B/C/A stack stays applied after the D no-op
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4657,7 +4665,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* b390237 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+* f1a206b (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 * f084d61 (C, B, A) A2
 * 7076dee (E, D) A1
 * 85efbe4 (origin/main, main) M
@@ -4685,7 +4693,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // after unapplying C, B/A/E remains applied with D only as an ambiguous ref on E's tip
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4693,10 +4701,9 @@ Outcome {
 📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
 └── ≡📙:B on 85efbe4 {41}
     ├── 📙:B
-    ├── 📙:A
-    │   └── ·f084d61 (🏘️)
-    └── 📙:E
-        └── ·7076dee (🏘️) ►D
+    └── 📙:A
+        ├── ·f084d61 (🏘️)
+        └── ·7076dee (🏘️) ►D, ►E
 
 "#]]
     );
@@ -4704,7 +4711,7 @@ Outcome {
     snapbox::assert_data_eq!(
         visualize_commit_graph_all(&repo)?,
         snapbox::str![[r#"
-* b390237 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+* f1a206b (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 * f084d61 (C, B, A) A2
 * 7076dee (E, D) A1
 * 85efbe4 (origin/main, main) M
@@ -4732,7 +4739,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // after unapplying B, no applied stacks remain
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4747,7 +4754,7 @@ Outcome {
         snapbox::str![[r#"
 * f084d61 (C, B, A) A2
 * 7076dee (E, D) A1
-| * bde8ed6 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| * 77cd466 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |/  
 * 85efbe4 (origin/main, main) M
 
@@ -4774,7 +4781,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace.into_owned();
+    let ws = out.workspace.unwrap_or(ws);
     // the workspace stays empty after the A no-op
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4789,7 +4796,7 @@ Outcome {
         snapbox::str![[r#"
 * f084d61 (C, B, A) A2
 * 7076dee (E, D) A1
-| * bde8ed6 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| * 77cd466 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |/  
 * 85efbe4 (origin/main, main) M
 
@@ -4818,7 +4825,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // the projection is the checked-out target branch
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -4900,13 +4907,13 @@ fn apply_with_conflicts_shows_exact_conflict_info() -> anyhow::Result<()> {
             Category::LocalBranch
                 .to_full_name(branch_to_apply)?
                 .as_ref(),
-            ws,
+            &ws,
             &repo,
             &mut meta,
             apply_options(),
         )
         .unwrap_or_else(|err| panic!("{branch_to_apply}: {err}"));
-        ws = out.workspace;
+        ws = out.display_workspace()?;
     }
 
     snapbox::assert_data_eq!(
@@ -4938,7 +4945,7 @@ fn apply_with_conflicts_shows_exact_conflict_info() -> anyhow::Result<()> {
         snapbox::str![[r#"
 * 4bbb93c (conflict-hero) add conflicting-F2
 * 98519e9 add conflicting-F1
-| *-----.   e13e11a (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| *-----.   9c93ced (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |/|\ \ \ \  
 | | | | | * 34c4591 (clean-C) add C
 | |_|_|_|/  
@@ -4962,7 +4969,7 @@ fn apply_with_conflicts_shows_exact_conflict_info() -> anyhow::Result<()> {
 
     let out = but_workspace::branch::apply(
         r("refs/heads/conflict-hero"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         apply_options(),
@@ -4987,7 +4994,7 @@ Outcome {
 }
 "#]]
     );
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     // By default, it fails and just reports the conflicting stacks, so it's the same as it was before.
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -5025,7 +5032,7 @@ Outcome {
 
     let out = but_workspace::branch::apply(
         r("refs/heads/conflict-hero"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         but_workspace::branch::apply::Options {
@@ -5056,7 +5063,7 @@ Outcome {
     );
 
     // Now the other stacks are unapplied.
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -5085,7 +5092,7 @@ Outcome {
 * bf09eae (conflict-F1) add F1
 | * f2ce66d (conflict-F2) add F2
 |/  
-| *---.   c51f37c (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| *---.   aefb230 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 |/|\ \ \  
 | | | | * 4bbb93c (conflict-hero) add conflicting-F2
 | | | | * 98519e9 add conflicting-F1
@@ -5222,8 +5229,8 @@ fn conflicting_apply_reports_no_applied_branches_and_names_conflicting_stacks() 
     );
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
-    let ws = out.workspace;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
+    let ws = out.display_workspace()?;
     // A is applied before trying the conflicting sibling branch
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -5241,7 +5248,7 @@ fn conflicting_apply_reports_no_applied_branches_and_names_conflicting_stacks() 
         snapbox::str![[r#"
 * 543911c (add-A-too) add a different A
 * b1540e5 (main) M
-| * 9f5b797 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| * 0c1287d (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 | * bf53300 (A) add A
 |/  
 | * 0e391b2 (origin/B) add B
@@ -5253,7 +5260,7 @@ fn conflicting_apply_reports_no_applied_branches_and_names_conflicting_stacks() 
 
     let out = but_workspace::branch::apply(
         r("refs/heads/add-A-too"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         apply_options(),
@@ -5340,7 +5347,7 @@ fn unapply_with_workspace_merge_conflicts_always_works_as_conflicts_do_not_repea
             Category::LocalBranch
                 .to_full_name(branch_to_apply)?
                 .as_ref(),
-            ws,
+            &ws,
             &repo,
             &mut meta,
             but_workspace::branch::apply::Options {
@@ -5349,7 +5356,7 @@ fn unapply_with_workspace_merge_conflicts_always_works_as_conflicts_do_not_repea
                 ..apply_options()
             },
         )?;
-        ws = out.workspace;
+        ws = out.display_workspace()?;
     }
     // all branches are applied
     snapbox::assert_data_eq!(
@@ -5385,7 +5392,7 @@ fn unapply_with_workspace_merge_conflicts_always_works_as_conflicts_do_not_repea
             &mut meta,
             unapply_options_with(WorkspaceDisposition::KeepWorkspaceReference),
         )?;
-        ws = out.workspace.into_owned();
+        ws.adopt(out.workspace);
     }
 
     // the workspace ref remains because the regenerated workspace still has main available
@@ -5436,7 +5443,7 @@ fn auto_checkout_of_enclosing_workspace_flat() -> anyhow::Result<()> {
     // Apply the workspace ref itself, it's a no-op
     let out = but_workspace::branch::apply(
         r("refs/heads/gitbutler/workspace"),
-        ws,
+        &ws,
         &repo,
         &mut meta,
         apply_options(),
@@ -5474,13 +5481,7 @@ Outcome {
 "#]]
     );
     // Already applied (the HEAD points to it).
-    let out = but_workspace::branch::apply(
-        b_ref.as_ref(),
-        ws.clone(),
-        &repo,
-        &mut meta,
-        apply_options(),
-    )?;
+    let out = but_workspace::branch::apply(b_ref.as_ref(), &ws, &repo, &mut meta, apply_options())?;
     // no-ops aren't listing the already applied branches
     snapbox::assert_data_eq!(
         out.to_debug(),
@@ -5504,7 +5505,7 @@ Outcome {
 
     // To apply A, we checkout the surrounding workspace and repair the stale metadata.
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     assert_eq!(
         out.status,
         OutcomeStatus::Applied,
@@ -5530,7 +5531,7 @@ Outcome {
     );
 
     // Now the workspace ref itself is checked out.
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -5577,7 +5578,7 @@ Outcome {
     );
 
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     // Nothing changed, the desired branch was already applied
     snapbox::assert_data_eq!(
         out.to_debug(),
@@ -5611,7 +5612,7 @@ Outcome {
 
     // Apply the first branch, it must be independent.
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     assert_eq!(
         out.status,
         OutcomeStatus::Applied,
@@ -5628,7 +5629,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -5641,7 +5642,7 @@ Outcome {
 
     // Apply the first branch, it must be independent.
     let out =
-        but_workspace::branch::apply(r("refs/heads/B"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/B"), &ws, &repo, &mut meta, apply_options())?;
     snapbox::assert_data_eq!(
         out.to_debug(),
         snapbox::str![[r#"
@@ -5655,7 +5656,7 @@ Outcome {
     );
     // B is added as independent stack
     snapbox::assert_data_eq!(
-        graph_workspace(&out.workspace).to_string(),
+        graph_workspace(&out.display_workspace()?).to_string(),
         snapbox::str![[r#"
 📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓! on e5d0542
 ├── ≡📙:A on e5d0542 {41}
@@ -5687,7 +5688,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     let out = but_workspace::branch::unapply(
         r("refs/heads/A"),
         &ws,
@@ -5706,7 +5707,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // the workspace is empty again
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -5742,7 +5743,7 @@ Outcome {
 
 "#]]
     );
-    let ws = out.workspace.into_owned();
+    let ws = out.display_workspace()?;
     // the workspace is empty again
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
@@ -5802,7 +5803,7 @@ fn auto_checkout_of_enclosing_workspace_with_commits() -> anyhow::Result<()> {
 
     // Apply the workspace ref itself, it's a no-op
     let ws_ref = r("refs/heads/gitbutler/workspace");
-    let out = but_workspace::branch::apply(ws_ref, ws, &repo, &mut meta, apply_options())?;
+    let out = but_workspace::branch::apply(ws_ref, &ws, &repo, &mut meta, apply_options())?;
     // the workspace ref itself counts as no-op as well
     snapbox::assert_data_eq!(
         out.to_debug(),
@@ -5839,13 +5840,7 @@ Outcome {
     );
 
     // Already applied (the HEAD points to it, it literally IS the workspace).
-    let out = but_workspace::branch::apply(
-        b_ref.as_ref(),
-        ws.clone(),
-        &repo,
-        &mut meta,
-        apply_options(),
-    )?;
+    let out = but_workspace::branch::apply(b_ref.as_ref(), &ws, &repo, &mut meta, apply_options())?;
     // already applied branches are a no-op, even when a stack segment is checked out
     snapbox::assert_data_eq!(
         out.to_debug(),
@@ -5859,8 +5854,8 @@ Outcome {
 "#]]
     );
 
-    let err = but_workspace::branch::apply(ws_ref, ws.clone(), &repo, &mut meta, apply_options())
-        .unwrap_err();
+    let err =
+        but_workspace::branch::apply(ws_ref, &ws, &repo, &mut meta, apply_options()).unwrap_err();
     assert_eq!(
         err.to_string(),
         "Refusing to apply a reference that already is a workspace: 'gitbutler/workspace'",
@@ -5871,7 +5866,7 @@ Outcome {
     // To apply, we just checkout the surrounding workspace.
     let b_tip_before_apply = id_by_rev(&repo, "B");
     let out =
-        but_workspace::branch::apply(r("refs/heads/A"), ws, &repo, &mut meta, apply_options())?;
+        but_workspace::branch::apply(r("refs/heads/A"), &ws, &repo, &mut meta, apply_options())?;
     assert_eq!(
         out.status,
         OutcomeStatus::Applied,
@@ -5894,7 +5889,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -5947,7 +5942,7 @@ fn apply_nonexisting_branch_failure() -> anyhow::Result<()> {
 
     let err = but_workspace::branch::apply(
         r("refs/heads/does-not-exist"),
-        ws,
+        &ws,
         &repo,
         &mut *meta,
         apply_options(),
@@ -6054,7 +6049,7 @@ fn unborn_apply_needs_base() -> anyhow::Result<()> {
     // Idempotency in ad-hoc workspace
     let out = but_workspace::branch::apply(
         r("refs/heads/main"),
-        ws.clone(),
+        &ws,
         &repo,
         &mut *meta,
         apply_options(),
@@ -6076,7 +6071,7 @@ Outcome {
     // but since remote is transformed into a local tracking branch, it's a noop.
     let out = but_workspace::branch::apply(
         r("refs/remotes/orphan/main"),
-        ws,
+        &ws,
         &repo,
         &mut *meta,
         apply_options(),
@@ -6094,7 +6089,7 @@ Outcome {
 "#]]
     );
 
-    let ws = out.workspace;
+    let ws = out.display_workspace()?;
     snapbox::assert_data_eq!(
         graph_workspace(&ws).to_string(),
         snapbox::str![[r#"
@@ -6164,3 +6159,155 @@ mod utils {
     }
 }
 use utils::{standard_traversal_options, standard_traversal_options_with_extra_target};
+
+/// A shared parent segment legitimately displays under EVERY stack that contains it —
+/// unapply's metadata reconciliation must not trip over the duplicate name.
+#[test]
+fn unapply_with_shared_segment_across_stacks() -> anyhow::Result<()> {
+    let (_tmp, ws, repo, mut meta, _description) =
+        named_writable_scenario_with_description_and_graph(
+            "ws-ref-ws-commit-two-stacks-shared-parent",
+            |meta| {
+                add_stack_with_segments(meta, 1, "B-on-A", StackState::InWorkspace, &[]);
+                add_stack_with_segments(meta, 2, "C-on-A", StackState::InWorkspace, &[]);
+            },
+        )?;
+    snapbox::assert_data_eq!(
+        graph_workspace(&ws).to_string(),
+        snapbox::str![[r#"
+📕🏘️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
+├── ≡📙:B-on-A on 85efbe4 {1}
+│   ├── 📙:B-on-A
+│   │   └── ·654819c (🏘️)
+│   └── :A
+│       └── ·7076dee (🏘️)
+└── ≡📙:C-on-A on 85efbe4 {2}
+    ├── 📙:C-on-A
+    │   └── ·76d6426 (🏘️)
+    └── :A
+        └── ·7076dee (🏘️)
+
+"#]]
+    );
+
+    let out = but_workspace::branch::unapply(
+        r("refs/heads/C-on-A"),
+        &ws,
+        &repo,
+        &mut meta,
+        unapply_options(),
+    )
+    .expect("the duplicate display mention of the shared segment must not fail reconciliation");
+
+    // C-on-A is gone; B-on-A keeps the shared parent below it.
+    snapbox::assert_data_eq!(
+        graph_workspace(&out.display_workspace()?).to_string(),
+        snapbox::str![[r#"
+📕🏘️⚠️:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
+└── ≡📙:B-on-A on 85efbe4 {1}
+    ├── 📙:B-on-A
+    │   └── ·654819c (🏘️)
+    └── :A
+        └── ·7076dee (🏘️)
+
+"#]]
+    );
+    let ws_md = meta.workspace(r("refs/heads/gitbutler/workspace"))?;
+    assert_eq!(
+        ws_md
+            .stacks
+            .iter()
+            .flat_map(|stack| stack.branches.iter())
+            .filter(|branch| branch.ref_name.as_ref().as_bstr() == "refs/heads/A")
+            .count(),
+        0,
+        "the unlisted shared parent stays out of metadata — display sharing is not membership"
+    );
+    Ok(())
+}
+
+/// KEYSTONE for editor-based unapply: removing the
+/// ws→leg edge selected BY REFERENCE and materializing rebuilds the merge minus
+/// exactly that leg — objects, safe checkout and ref edits in that order.
+#[test]
+fn editor_leg_removal_rebuilds_merge() -> anyhow::Result<()> {
+    let (_tmp, mut ws, repo, mut meta, _description) =
+        named_writable_scenario_with_description_and_graph(
+            "ws-ref-ws-commit-two-stacks-shared-parent",
+            |meta| {
+                add_stack_with_segments(meta, 1, "B-on-A", StackState::InWorkspace, &[]);
+                add_stack_with_segments(meta, 2, "C-on-A", StackState::InWorkspace, &[]);
+            },
+        )?;
+    let ws_commit = ws.tip_commit_id().expect("managed ws commit");
+
+    let mut editor = but_rebase::graph_rebase::Editor::create(
+        ws.commit_graph(),
+        ws.project_meta(),
+        &mut meta,
+        &repo,
+    )?;
+    let ws_pick = editor.select_commit(ws_commit)?;
+    let leg_ref = editor.select_reference("refs/heads/C-on-A".try_into()?)?;
+    let removed = editor.detach(ws_pick, leg_ref)?;
+    assert_eq!(
+        removed.len(),
+        1,
+        "exactly the subject's leg edge is removed"
+    );
+
+    let materialized = editor.rebase()?.materialize()?;
+    ws.refresh_from_commit_graph(materialized.arena().clone(), &repo, materialized.meta)?;
+    let project_meta = ws.project_meta().clone();
+    ws.refresh_from_head(&repo, &meta, project_meta)?;
+
+    snapbox::assert_data_eq!(
+        visualize_commit_graph_all(&repo)?,
+        snapbox::str![[r#"
+* 76d6426 (C-on-A) C1
+| * c94e1b5 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+| * 654819c (B-on-A) B1
+|/  
+* 7076dee (A) A1
+* 85efbe4 (origin/main, main) M
+
+"#]]
+    );
+    Ok(())
+}
+
+/// Unapplying X performs ONE targeted metadata edit: X's stack leaves, and no other
+/// stack's declaration changes in any way — no minted ids, no membership moves, no
+/// order changes (the old projection-reconciliation rewrote unrelated stacks).
+#[test]
+fn unapply_leaves_unrelated_metadata_untouched() -> anyhow::Result<()> {
+    let (_tmp, ws, repo, mut meta, _description) =
+        named_writable_scenario_with_description_and_graph(
+            "ws-ref-ws-commit-single-stack-double-stack",
+            |meta| {
+                add_stack_with_segments(meta, 1, "A", StackState::InWorkspace, &[]);
+                add_stack_with_segments(meta, 2, "C", StackState::InWorkspace, &["B"]);
+            },
+        )?;
+    let ws_ref = r("refs/heads/gitbutler/workspace");
+    let before: Vec<_> = meta.workspace(ws_ref)?.stacks.clone();
+
+    but_workspace::branch::unapply(r("refs/heads/A"), &ws, &repo, &mut meta, unapply_options())?;
+
+    let after: Vec<_> = meta.workspace(ws_ref)?.stacks.clone();
+    let expected: Vec<_> = before
+        .iter()
+        .filter(|stack| {
+            stack
+                .branches
+                .iter()
+                .all(|branch| branch.ref_name.as_ref().as_bstr() != "refs/heads/A")
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        after, expected,
+        "only A's stack left the declaration; everything else is byte-identical"
+    );
+    Ok(())
+}

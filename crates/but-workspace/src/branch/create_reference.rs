@@ -211,16 +211,18 @@ pub(super) mod function {
     /// checkout-after-create). Placing above a branch that is not the entrypoint leaves the
     /// entrypoint untouched.
     ///
-    /// Return a regenerated Graph that contains the new reference, and from which a new workspace can be derived.
-    pub fn create_reference<'ws, 'name, T: RefMetadata>(
+    /// Return a regenerated substrate that contains the new reference, or `None` if the
+    /// reference already was a workspace segment and nothing changed — the caller's
+    /// workspace remains current in that case.
+    pub fn create_reference<'name, T: RefMetadata>(
         ref_name: impl Borrow<gix::refs::FullNameRef>,
         anchor: impl Into<Option<Anchor<'name>>>,
         repo: &gix::Repository,
-        workspace: &'ws but_graph::Workspace,
+        workspace: &but_graph::Workspace,
         meta: &mut T,
         new_stack_id: impl FnOnce(&gix::refs::FullNameRef) -> StackId,
         order: impl Into<Option<usize>>,
-    ) -> anyhow::Result<Cow<'ws, but_graph::Workspace>> {
+    ) -> anyhow::Result<Option<but_graph::Workspace>> {
         let anchor = anchor.into();
         let order = order.into();
 
@@ -235,8 +237,8 @@ pub(super) mod function {
             .try_find_reference(ref_name)?
             .map(|mut reference| reference.peel_to_id().map(|id| id.detach()))
             .transpose()?;
-        let existing_ref_target_in_workspace = existing_ref_target_id
-            .filter(|id| workspace.find_owner_indexes_by_commit_id(*id).is_some());
+        let existing_ref_target_in_workspace =
+            existing_ref_target_id.filter(|id| workspace.find_commit_and_containers(*id).is_some());
 
         let AnchorResolution {
             target_id: ref_target_id,
@@ -251,7 +253,7 @@ pub(super) mod function {
                     .find_segment_and_stack_by_refname(ref_name)
                     .is_some()
                 {
-                    return Ok(Cow::Borrowed(workspace));
+                    return Ok(None);
                 }
                 if let Some(existing_ref_target_id) = existing_ref_target_in_workspace {
                     let instruction = existing_ws_meta
@@ -306,9 +308,12 @@ pub(super) mod function {
                 position,
             }) => {
                 let mut validate_id = true;
-                let indexes = workspace.try_find_owner_indexes_by_commit_id(commit_id)?;
-                let ref_target_id =
-                    position.resolve_commit(workspace.lookup_commit(indexes).into(), ws_base)?;
+                let (stack, _seg) = workspace.try_find_commit_and_containers(commit_id)?;
+                let commit = workspace
+                    .commit_graph()
+                    .node(commit_id)
+                    .context("BUG: a contained commit is in the graph")?;
+                let ref_target_id = position.resolve_commit(commit.into(), ws_base)?;
                 let id_out_of_workspace = Some(ref_target_id) == ws_base;
                 if id_out_of_workspace {
                     validate_id = false
@@ -318,13 +323,7 @@ pub(super) mod function {
                     .as_ref()
                     .filter(|_| !id_out_of_workspace)
                     .map(|_| instruction_by_named_anchor_for_commit(workspace, commit_id))
-                    .or_else(|| {
-                        let (stack_idx, _seg_idx, _cidx) = indexes;
-                        workspace.stacks[stack_idx]
-                            .id
-                            .map(Instruction::DependentInStack)
-                            .map(Ok)
-                    })
+                    .or_else(|| stack.id.map(Instruction::DependentInStack).map(Ok))
                     .transpose()?;
 
                 AnchorResolution::positioned(ref_target_id, validate_id, instruction)
@@ -333,11 +332,21 @@ pub(super) mod function {
                 let mut validate_id = true;
                 let ref_target_id = if workspace.has_metadata() {
                     let resting_id = workspace.try_branch_resting_commit_id(ref_name.as_ref())?;
-                    let commit = workspace
-                        .commit_graph()
-                        .node(resting_id)
-                        .context("BUG: the resting commit is part of the graph")?;
-                    let id = position.resolve_commit(commit.into(), ws_base)?;
+                    // An EMPTY anchor rests on the segment below it — the new reference
+                    // shares that commit for either position, only the ordering differs.
+                    // Stepping to the parent would skip that segment's whole territory.
+                    let anchor_is_empty = workspace
+                        .find_segment_and_stack_by_refname(ref_name.as_ref())
+                        .is_some_and(|(_, segment)| segment.tip().is_none());
+                    let id = if anchor_is_empty {
+                        resting_id
+                    } else {
+                        let commit = workspace
+                            .commit_graph()
+                            .node(resting_id)
+                            .context("BUG: the resting commit is part of the graph")?;
+                        position.resolve_commit(commit.into(), ws_base)?
+                    };
                     if Some(id) == ws_base {
                         validate_id = false
                     }
@@ -351,14 +360,14 @@ pub(super) mod function {
                             ref_name.shorten()
                         );
                     };
-                    position.resolve_commit(
-                        segment
-                            .commits
-                            .first()
-                            .context("Cannot create reference on unborn branch")?
-                            .into(),
-                        ws_base,
-                    )?
+                    let tip = segment
+                        .tip()
+                        .context("Cannot create reference on unborn branch")?;
+                    let commit = workspace
+                        .commit_graph()
+                        .node(tip)
+                        .context("BUG: a segment tip is in the graph")?;
+                    position.resolve_commit(commit.into(), ws_base)?
                 };
                 AnchorResolution::positioned(
                     ref_target_id,
@@ -419,7 +428,7 @@ pub(super) mod function {
             .transpose()?;
         // Assure this commit is in the workspace as well.
         if check_if_id_in_workspace {
-            workspace.try_find_owner_indexes_by_commit_id(ref_target_id)?;
+            workspace.try_find_commit_and_containers(ref_target_id)?;
         }
 
         let updated_workspace = {
@@ -536,7 +545,7 @@ pub(super) mod function {
         update_branch_metadata(ref_name, repo, &mut branch_md)?;
         meta.set_branch(&branch_md)?;
 
-        Ok(Cow::Owned(updated_workspace))
+        Ok(Some(updated_workspace))
     }
 
     /// Resolve an [`Anchor::AtReference`] in an ad-hoc (single-branch) workspace against a local
@@ -690,6 +699,7 @@ pub(super) mod function {
                     .push(WorkspaceStackBranch {
                         ref_name: new_ref.to_owned(),
                         archived: false,
+                        parents: None,
                     });
             }
             // create new
@@ -700,6 +710,7 @@ pub(super) mod function {
                     branches: vec![WorkspaceStackBranch {
                         ref_name: new_ref.to_owned(),
                         archived: false,
+                        parents: None,
                     }],
                 };
 
@@ -736,6 +747,7 @@ pub(super) mod function {
                     WorkspaceStackBranch {
                         ref_name: new_ref.to_owned(),
                         archived: false,
+                        parents: None,
                     },
                 );
             }
@@ -751,46 +763,28 @@ pub(super) mod function {
         ws: &but_graph::Workspace,
         anchor_id: gix::ObjectId,
     ) -> anyhow::Result<Instruction<'static>> {
-        use Position::*;
-        let (anchor_stack_idx, anchor_seg_idx, _anchor_commit_idx) = ws
-            .find_owner_indexes_by_commit_id(anchor_id)
-            .with_context(|| {
-                format!(
-                    "No segment in workspace at '{}' that holds {anchor_id}",
-                    ws.ref_name_display()
-                )
-            })?;
-
-        let stack = &ws.stacks[anchor_stack_idx];
-        // Find first non-empty segment in this stack upward and downward.
-        let instruction = (0..anchor_seg_idx + 1)
-            .rev()
-            .find_map(|seg_idx| {
-                let s = &stack.segments[seg_idx];
-                s.ref_name()
-                    .map(|rn| (rn, Below))
-                    .filter(|_| s.metadata.is_some())
-            })
-            .or_else(|| {
-                (anchor_seg_idx + 1..stack.segments.len()).find_map(|seg_idx| {
-                    let s = &stack.segments[seg_idx];
-                    s.ref_name()
-                        .map(|rn| (rn, Above))
-                        .filter(|_| s.metadata.is_some())
-                })
-            })
-            .map(|(anchor_ref, position)| Instruction::Dependent {
+        let (stack, _seg) = ws.find_commit_and_containers(anchor_id).with_context(|| {
+            format!(
+                "No segment in workspace at '{}' that holds {anchor_id}",
+                ws.ref_name_display()
+            )
+        })?;
+        // The nearest named+metadata segment (below the anchor first, then above) is the branch the
+        // new dependent reference orders against; with none, create the first branch directly.
+        let instruction = ws
+            .nearest_named_metadata_segment(anchor_id)
+            .map(|(anchor_ref, below)| Instruction::Dependent {
                 ref_name: Cow::Owned(anchor_ref.to_owned()),
-                position,
-            })
-            .unwrap_or(
-                // Not a single name? It's empty, or branch metadata is missing.
-                // Create the first branch (then with metadata) directly.
-                match stack.id {
-                    None => Instruction::Independent,
-                    Some(id) => Instruction::DependentInStack(id),
+                position: if below {
+                    Position::Below
+                } else {
+                    Position::Above
                 },
-            );
+            })
+            .unwrap_or(match stack.id {
+                None => Instruction::Independent,
+                Some(id) => Instruction::DependentInStack(id),
+            });
         Ok(instruction)
     }
 

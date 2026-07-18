@@ -333,9 +333,11 @@ pub(crate) fn traverse<T: RefMetadata>(
             &mut seed_segments,
             &mut ep_seed,
             &next,
-            &initial_seeds.symbolic_remote_names,
-            &configured_remote_tracking_branches,
-            &initial_seeds.target_refs,
+            RemoteResolution {
+                symbolic_remote_names: &initial_seeds.symbolic_remote_names,
+                configured_tracking: &configured_remote_tracking_branches,
+                target_refs: &initial_seeds.target_refs,
+            },
             meta,
             id,
             limit,
@@ -597,7 +599,7 @@ struct PendingSeed {
     queue_front: bool,
 }
 
-/// The target/local pairing ledger of the initial-seed queueing: a target seed must
+/// The target/local pairing registry of the initial-seed queueing: a target seed must
 /// queue with its LOCAL partner's goal flag in its limit (so the target's walk can find
 /// the local), so a target arriving before its local PARKS here and is released when
 /// the local passes by — before the local's own queue item when both point at the same
@@ -639,7 +641,7 @@ impl PendingTargets<'_, '_> {
     }
 
     /// A target seed arrives: queue it right away when it has no local partner (no goal
-    /// to wait for) or when the partner's goal is already on the ledger — park it
+    /// to wait for) or when the partner's goal is already recorded — park it
     /// otherwise.
     fn park_or_queue(
         &mut self,
@@ -660,7 +662,7 @@ impl PendingTargets<'_, '_> {
         }
     }
 
-    /// Release the target parked for `target_ref`, if any, with the ledger's goal flag.
+    /// Release the target parked for `target_ref`, if any, with the recorded goal flag.
     fn release(
         &mut self,
         next: &mut Queue,
@@ -1027,6 +1029,17 @@ fn prune_integrated_tips(next: &mut Queue, ep_first_flags: Option<CommitFlags>) 
     next.exhaust();
 }
 
+/// How to resolve and exclude remote-tracking branches during the walk: the symbolic remote
+/// names to try, the configured remote-tracking set, and the workspace target refs (never
+/// re-queued as their own remotes). Bundled so `target_refs` can't be transposed with the
+/// commit's `refs` — both were bare `&[FullName]`.
+#[derive(Clone, Copy)]
+struct RemoteResolution<'a> {
+    symbolic_remote_names: &'a [String],
+    configured_tracking: &'a std::collections::BTreeSet<gix::refs::FullName>,
+    target_refs: &'a [gix::refs::FullName],
+}
+
 /// Queue the remote-tracking branches of newly seen local branches (lookup, goals, limits);
 /// the proxy segment becomes a seed record (its name is used for the double-queue check).
 #[allow(clippy::too_many_arguments)]
@@ -1036,9 +1049,7 @@ fn try_queue_remote_tracking_branches<T: RefMetadata>(
     seed_segments: &mut Vec<SeedSegment>,
     ep_seed: &mut Option<usize>,
     next: &Queue,
-    target_symbolic_remote_names: &[String],
-    configured_remote_tracking_branches: &std::collections::BTreeSet<gix::refs::FullName>,
-    target_refs: &[gix::refs::FullName],
+    remotes: RemoteResolution<'_>,
     meta: &OverlayMetadata<'_, T>,
     id: gix::ObjectId,
     limit: Limit,
@@ -1056,13 +1067,13 @@ fn try_queue_remote_tracking_branches<T: RefMetadata>(
             super::remotes::lookup_remote_tracking_branch_or_deduce_it(
                 repo,
                 rn.as_ref(),
-                target_symbolic_remote_names,
-                configured_remote_tracking_branches,
+                remotes.symbolic_remote_names,
+                remotes.configured_tracking,
             )?
         else {
             continue;
         };
-        if target_refs.contains(&remote_tracking_branch) {
+        if remotes.target_refs.contains(&remote_tracking_branch) {
             continue;
         }
         let Some(remote_tip) =

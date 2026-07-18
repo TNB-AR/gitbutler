@@ -556,7 +556,8 @@ fn backfill_branch_ref_from_legacy_stack_id(
             && let Some(stack_id) = assignment.stack_id
         {
             assignment.branch_ref_bytes = workspace
-                .find_stack_by_id(stack_id)
+                .segment_graph
+                .stack_by_id(stack_id)
                 .and_then(|stack| stack.ref_name())
                 .map(|ref_name| ref_name.to_owned());
         }
@@ -568,13 +569,10 @@ fn workspace_branches_by_stack(
     workspace: &but_graph::Workspace,
 ) -> HashMap<StackId, Vec<gix::refs::FullName>> {
     let mut branches_by_stack = HashMap::new();
-    for stack in &workspace.stacks {
+    for stack in &workspace.segment_graph.stacks {
         if let Some(id) = stack.id {
-            let branch_refs: Vec<gix::refs::FullName> = stack
-                .segments
-                .iter()
-                .filter_map(|s| s.ref_name().map(|r| r.to_owned()))
-                .collect();
+            let branch_refs: Vec<gix::refs::FullName> =
+                stack.segment_names().map(ToOwned::to_owned).collect();
             branches_by_stack.insert(id, branch_refs);
         }
     }
@@ -740,7 +738,8 @@ fn requests_to_assignments(
             ),
             Some(HunkAssignmentTarget::Stack { stack_id }) => Some(
                 workspace
-                    .find_stack_by_id(stack_id)
+                    .segment_graph
+                    .stack_by_id(stack_id)
                     .and_then(|stack| stack.ref_name())
                     .map(|ref_name| ref_name.to_owned())
                     .ok_or_else(|| {
@@ -994,7 +993,7 @@ mod tests {
 
     fn workspace_with_stacks(stacks: Vec<Stack>) -> Workspace {
         let mut ws = empty_workspace();
-        ws.stacks = stacks;
+        ws.set_segment_graph_from_stacks_for_testing(&stacks);
         ws
     }
 

@@ -91,10 +91,10 @@ pub struct DetailedGraphWorkspace {
 /// project the rebase's already-mutated commit graph directly, serving its pending ref edits
 /// and entrypoint from the overlay — no repository rewalk.
 pub fn overlayed_workspace<M: RefMetadata>(
-    workspace: &but_graph::Workspace,
+    substrate: &but_graph::Workspace,
     rebase: &but_rebase::graph_rebase::SuccessfulRebase<'_, M>,
 ) -> Result<but_graph::Workspace> {
-    workspace.preview_from_commit_graph(
+    substrate.preview_from_commit_graph(
         rebase.arena().clone(),
         rebase.repo(),
         rebase.meta(),
@@ -114,7 +114,7 @@ pub fn detailed_graph_workspace<M: RefMetadata>(
         meta,
         repo,
     )?;
-    let ws = editor.graph_workspace()?;
+    let ws = editor.graph_workspace(&workspace.segment_graph)?;
 
     Ok(DetailedGraphWorkspace {
         stacks: ws

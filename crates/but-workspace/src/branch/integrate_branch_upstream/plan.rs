@@ -3,18 +3,11 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context as _, Result, bail};
-use bstr::BStr;
-use but_core::{
-    ChangeId, RefMetadata, RepositoryExt,
-    commit::{add_conflict_markers, write_conflicted_tree},
-};
-use but_rebase::{
-    commit::DateMode,
-    graph_rebase::{
-        Editor, LookupStep, Selector, Step,
-        merge_commit_changes::MergeCommitChangesOutcome,
-        selector::{SelectorSet, StepRange},
-    },
+use but_core::{ChangeId, RefMetadata, RepositoryExt};
+use but_rebase::graph_rebase::{
+    Editor, LookupStep, Selector, Step,
+    mutate::Reconnect,
+    selector::{SelectorSet, StepRange},
 };
 
 use crate::graph_manipulation::{
@@ -287,41 +280,16 @@ fn prepare_squash_step_for_editor<M: RefMetadata>(
     let tip_commit_id = *ordered_commit_ids
         .last()
         .expect("validated non-empty squash commit list");
-    let mut squashed_commit = editor.find_commit(tip_commit_id)?;
-    squashed_commit.inner.parents = vec![squashed_parent].into();
+    let squashed_commit = editor.find_commit(tip_commit_id)?;
     let commit_message = message
         .map(|message| message.as_bytes().to_vec())
         .unwrap_or_else(|| Vec::from(squashed_commit.message.clone()));
-    apply_merge_commit_changes_outcome(
-        editor.repo(),
-        &mut squashed_commit,
+    editor.new_squashed_commit(
+        squashed_commit,
+        vec![squashed_parent],
         merge_outcome,
         commit_message,
-    )?;
-
-    editor.new_commit(squashed_commit, DateMode::CommitterUpdateAuthorKeep)
-}
-
-fn apply_merge_commit_changes_outcome(
-    repo: &gix::Repository,
-    commit: &mut but_core::CommitOwned,
-    outcome: MergeCommitChangesOutcome,
-    message: Vec<u8>,
-) -> Result<()> {
-    if let Some(conflict) = outcome.conflict {
-        commit.tree = write_conflicted_tree(
-            repo,
-            outcome.tree_id,
-            &conflict.tree_expression,
-            &conflict.conflict_entries,
-        )?;
-        commit.message = add_conflict_markers(BStr::new(&message));
-    } else {
-        commit.tree = outcome.tree_id;
-        commit.message = message.into();
-    }
-
-    Ok(())
+    )
 }
 
 /// Builds and inserts the integrated commit chain under `ref_name` down to the last step.
@@ -393,12 +361,8 @@ fn integration_steps_to_segment_steps_for_editor<M: RefMetadata>(
                 out.push(existing_or_new_pick_step(editor, *commit_id)?);
             }
             PreparedIntegrationStep::Merge { commit_id } => {
-                let mut merge_commit = editor.empty_commit()?;
-                merge_commit.message = format!("Merge {commit_id} into previous commit").into();
-                let merge_commit = editor.new_commit(
-                    merge_commit,
-                    but_rebase::commit::DateMode::CommitterKeepAuthorKeep,
-                )?;
+                let merge_commit =
+                    editor.new_merge_commit(format!("Merge {commit_id} into previous commit"))?;
                 let preserved_parents = editor
                     .find_commit(*commit_id)?
                     .inner
@@ -449,7 +413,7 @@ fn existing_or_new_pick_step<M: RefMetadata>(
             },
             SelectorSet::None,
             parents_to_disconnect,
-            true,
+            Reconnect::Skip,
         )?;
 
         // The integration rebuilds this commit onto new parents, so it must be

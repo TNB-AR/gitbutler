@@ -24,12 +24,62 @@ pub struct Outcome<'meta, M: RefMetadata> {
     pub branch_stack_order: Option<Vec<gix::refs::FullName>>,
 }
 
+/// What remains after [`Outcome::apply()`]: the pieces callers still need once the move is
+/// on disk and the workspace refreshed.
+pub struct Applied<'meta, M: RefMetadata> {
+    /// The metadata handle, released by materialization.
+    pub meta: &'meta mut M,
+    /// Every commit rewritten by the move, old id to new id.
+    pub commit_mappings: std::collections::BTreeMap<gix::ObjectId, gix::ObjectId>,
+    /// See [`Outcome::new_tip`]: the reference the caller should check out in single-branch
+    /// mode, `None` when the tip is unchanged. Applying does NOT move `HEAD`.
+    pub new_tip: Option<gix::refs::FullName>,
+}
+
+impl<'meta, M: RefMetadata> Outcome<'meta, M> {
+    /// Apply the move for real, in one step: materialize the rebase to disk, persist the
+    /// branch order and workspace metadata it decided, and refresh `ws` from the result.
+    ///
+    /// Metadata and refs move together here — persisting one without the other leaves a
+    /// projection that disagrees with disk. Dry runs preview via
+    /// [`SuccessfulRebase::rebase_overlay_with_workspace_overrides`] instead and never call
+    /// this.
+    pub fn apply(
+        self,
+        ws: &mut but_graph::Workspace,
+        repo: &gix::Repository,
+    ) -> anyhow::Result<Applied<'meta, M>> {
+        let Outcome {
+            rebase,
+            ws_meta,
+            new_tip,
+            branch_stack_order,
+        } = self;
+        let materialized = rebase.materialize()?;
+        if let Some(order) = branch_stack_order.as_deref() {
+            materialized.meta.set_branch_stack_order(order)?;
+        }
+        ws.refresh_from_commit_graph(materialized.arena().clone(), repo, materialized.meta)?;
+        if let Some((ws_meta, ref_name)) = ws_meta.zip(ws.ref_name()) {
+            let mut md = materialized.meta.workspace(ref_name)?;
+            *md = ws_meta;
+            md.set_project_meta(ws.project_meta().clone());
+            materialized.meta.set_workspace(&md)?;
+        }
+        Ok(Applied {
+            commit_mappings: materialized.history.commit_mappings(),
+            meta: materialized.meta,
+            new_tip,
+        })
+    }
+}
+
 pub(super) mod function {
 
     use but_core::RefMetadata;
     use but_core::ref_metadata::StackId;
-    use but_rebase::graph_rebase::mutate::InsertSide;
-    use but_rebase::graph_rebase::selector::{SelectorSet, SomeSelectors, StepRange};
+    use but_rebase::graph_rebase::mutate::{InsertSide, Reconnect};
+    use but_rebase::graph_rebase::selector::SomeSelectors;
 
     use crate::graph_manipulation::DisconnectParameters;
     use crate::graph_manipulation::get_disconnect_parameters;
@@ -132,7 +182,7 @@ pub(super) mod function {
             subject_delimiter.clone(),
             children_to_disconnect,
             parents_to_disconnect,
-            false,
+            Reconnect::Heal,
         )?;
 
         let selectors = SomeSelectors::new(vec![head_selector])?;
@@ -201,7 +251,7 @@ pub(super) mod function {
         match &workspace.kind {
             WorkspaceKind::AdHoc => move_branch_in_single_branch_mode(
                 successful_rebase,
-                workspace,
+                workspace.ref_name_owned(),
                 source,
                 destination,
                 subject_branch_name,
@@ -232,7 +282,7 @@ pub(super) mod function {
     /// skip persistence for dry-run previews.
     fn move_branch_in_single_branch_mode<'meta, M: RefMetadata>(
         mut successful_rebase: SuccessfulRebase<'meta, M>,
-        workspace: but_graph::Workspace,
+        entrypoint: Option<gix::refs::FullName>,
         source: WorkspaceSegmentContext,
         destination: WorkspaceSegmentContext,
         subject_branch_name: &FullNameRef,
@@ -240,25 +290,21 @@ pub(super) mod function {
     ) -> anyhow::Result<Outcome<'meta, M>> {
         let (source_stack, subject_segment) = &source;
         let (destination_stack, _) = &destination;
-        let entrypoint = workspace.ref_name().map(ToOwned::to_owned);
         // A branch that owns commits can only be reordered within its current stack in
         // single-branch mode. Moving it across stacks would change commit ownership and needs a
         // real rebase.
-        if !subject_segment.commits.is_empty() && !same_stack(source_stack, destination_stack) {
+        if subject_segment.tip().is_some() && !same_stack(source_stack, destination_stack) {
             bail!("Moving a non-empty branch in single-branch mode is not yet supported");
         }
-        // Reordering same-target empty refs only changes which empty segment is displayed first.
-        // If their targets differ, however, the subject crosses commit-owning segments and its ref
-        // must move with it or those commits would be projected as belonging to the empty branch.
-        // When the subject and target rest on the same commit, no commit relocates: the subject
-        // (the commit owner) stays put and the empty segments that sit above it on that shared
-        // commit drop onto its parent commit. Moving the subject's own commit range in that case is
-        // a degenerate, self-referential move that collides the shared-commit refs.
+        // Reordering same-target empty refs only changes which empty segment is displayed first —
+        // metadata alone covers it. Everything else needs the editor: the crossed refs (and
+        // possibly commits) must move to match the new order, or the projection would disagree
+        // with what was persisted.
         let subject_shares_target_commit = successful_rebase
             .reference_target(subject_branch_name)?
             == successful_rebase.reference_target(target_branch_name)?;
         let move_requires_graph_update =
-            !subject_segment.commits.is_empty() || !subject_shares_target_commit;
+            subject_segment.tip().is_some() || !subject_shares_target_commit;
         let existing_order = {
             let (_repo, meta) = successful_rebase.repo_and_meta_mut();
             if !meta.can_persist_branch_stack_order() {
@@ -307,60 +353,16 @@ pub(super) mod function {
         }
 
         if move_requires_graph_update {
-            let segment_index = |name: &FullNameRef| {
-                source_stack
-                    .segments
-                    .iter()
-                    .position(|segment| segment.ref_name() == Some(name))
-            };
-            let subject_index = segment_index(subject_branch_name)
-                .context("BUG: subject segment missing from its source stack")?;
-            let target_index = segment_index(target_branch_name)
-                .context("BUG: target segment missing from the source stack")?;
-
-            // The same-commit case: the subject stays, and the empty segments between it and the
-            // target (which all share its tip) drop onto the subject's parent commit — the base.
-            let between = source_stack
-                .segments
-                .get(target_index..subject_index)
-                .unwrap_or(&[]);
-            let empties_drop_below_subject = subject_shares_target_commit
-                && target_index < subject_index
-                && between.iter().all(|segment| segment.commits.is_empty());
+            // The subject's commits relocate only when the move crosses another commit owner.
+            // Crossing empties alone moves no commit: the subject's range already rests where
+            // it lands, and only the empty refs need re-pointing (the reconcile pass below).
+            let crossed = crossed_segments(source_stack, subject_branch_name, target_branch_name)?;
+            let needs_commit_surgery = subject_segment.tip().is_some()
+                && crossed.iter().any(|segment| segment.tip().is_some());
 
             let mut editor = successful_rebase.into_editor();
 
-            if empties_drop_below_subject {
-                // Re-anchor each empty into the base commit's group (above the base owner just
-                // below the subject), bottom to top, so it re-points onto the base and the group
-                // keeps its order below the subject. A single-entry reference range unhooks the
-                // empty from its current position without touching any commit.
-                let mut anchor_ref = source_stack
-                    .segments
-                    .get(subject_index + 1)
-                    .and_then(|segment| segment.ref_name())
-                    .context("No base segment below the subject to re-anchor empties onto")?
-                    .to_owned();
-                for segment in between.iter().rev() {
-                    let empty_ref = segment
-                        .ref_name()
-                        .context("Empty segment doesn't have a ref")?;
-                    let empty = editor.select_reference(empty_ref)?;
-                    let range = StepRange {
-                        child: empty,
-                        parent: empty,
-                    };
-                    editor.disconnect_range_from(
-                        range.clone(),
-                        SelectorSet::All,
-                        SelectorSet::All,
-                        false,
-                    )?;
-                    let anchor = editor.select_reference(anchor_ref.as_ref())?;
-                    editor.insert_range(anchor, range, InsertSide::Above)?;
-                    anchor_ref = empty_ref.to_owned();
-                }
-            } else {
+            if needs_commit_surgery {
                 let target_selector = editor
                     .select_reference(target_branch_name)
                     .context("Failed to find target reference in graph.")?;
@@ -373,9 +375,36 @@ pub(super) mod function {
                     subject_delimiter.clone(),
                     children_to_disconnect,
                     parents_to_disconnect,
-                    false,
+                    Reconnect::Heal,
                 )?;
                 editor.insert_range(target_selector, subject_delimiter, InsertSide::Above)?;
+            }
+
+            // Reconcile pass: re-anchor every empty ref of this stack directly above its
+            // below-neighbor per the new order, bottom to top. This is the one mechanism all
+            // empty-crossing shapes reduce to — empties dropping below a lifted subject,
+            // lifting above a lowered one, an empty subject relocating itself, and empties
+            // that rode a surgically moved commit — so refs always land where the persisted
+            // order says.
+            let mut anchor_ref: Option<gix::refs::FullName> = None;
+            for name in new_order.iter().rev() {
+                let is_empty_segment = segment_index_in(source_stack, name.as_ref())
+                    .and_then(|index| source_stack.segments.get(index))
+                    .map(|segment| segment.tip().is_none());
+                if is_empty_segment != Some(true) {
+                    // A commit owner, or a segment this stack doesn't know: a fixed anchor.
+                    anchor_ref = Some(name.clone());
+                    continue;
+                }
+                let anchor = anchor_ref.as_ref().with_context(|| {
+                    format!(
+                        "Unsupported reorder: empty branch '{}' would sit below the bottom branch",
+                        name.as_bstr()
+                    )
+                })?;
+                let anchor = editor.select_reference(anchor.as_ref())?;
+                editor.move_reference(name.as_ref(), anchor, InsertSide::Above)?;
+                anchor_ref = Some(name.clone());
             }
 
             return Ok(Outcome {
@@ -413,9 +442,19 @@ pub(super) mod function {
         }
 
         let (source_stack, subject_segment) = source;
-        let (_, target_segment) = destination;
-        if subject_segment.commits.is_empty()
-            && target_segment.commits.is_empty()
+        let (destination_stack, target_segment) = destination;
+        // Same-commit empty refs within ONE stack reorder purely in metadata. Empties on
+        // different commits are a real move (the subject's ref must re-point), and a
+        // same-commit move ACROSS stacks must still merge the subject into the target's
+        // chain in the editor — a metadata-only edit leaves the subject's old chain in
+        // the layout, and the next materialize builds a stale workspace parent from it.
+        let subject_shares_target_commit = successful_rebase
+            .reference_target(subject_branch_name)?
+            == successful_rebase.reference_target(target_branch_name)?;
+        if subject_segment.tip().is_none()
+            && target_segment.tip().is_none()
+            && subject_shares_target_commit
+            && same_stack(&source_stack, &destination_stack)
             && ws_meta.is_some()
         {
             if let Some(ws_meta) = ws_meta.as_mut() {
@@ -427,6 +466,61 @@ pub(super) mod function {
                 new_tip: None,
                 branch_stack_order: None,
             });
+        }
+
+        // A commit-owning subject crossing only empties within its stack relocates nothing:
+        // its range already rests where it lands. Running the pick surgery anyway is the
+        // degenerate self-move — it disconnects the range from the workspace commit and never
+        // reconnects it, expelling the subject's commits from the workspace. Re-anchor the
+        // crossed empty refs around the unchanged range instead.
+        if subject_segment.tip().is_some() && same_stack(&source_stack, &destination_stack) {
+            let crossed = crossed_segments(&source_stack, subject_branch_name, target_branch_name)?;
+            let target_index = segment_index_in(&source_stack, target_branch_name)
+                .context("BUG: target segment missing from the source stack")?;
+            let subject_index = segment_index_in(&source_stack, subject_branch_name)
+                .context("BUG: subject segment missing from its source stack")?;
+            if crossed.iter().all(|segment| segment.tip().is_none()) {
+                let mut editor = successful_rebase.into_editor();
+                if target_index < subject_index {
+                    // The subject lifts above the crossed empties: they drop below its
+                    // bottom-most commit, keeping their order.
+                    let mut anchor = editor.select_commit(
+                        subject_segment
+                            .commits
+                            .last()
+                            .copied()
+                            .context("BUG: non-empty subject has commits")?,
+                    )?;
+                    for segment in crossed {
+                        let empty_ref = segment
+                            .ref_name()
+                            .context("Empty segment doesn't have a ref")?;
+                        editor.move_reference(empty_ref, anchor, InsertSide::Below)?;
+                        anchor = editor.select_reference(empty_ref)?;
+                    }
+                } else {
+                    // The subject drops below the crossed empties: they lift above its tip
+                    // ref, keeping their order.
+                    let mut anchor_ref = subject_branch_name.to_owned();
+                    for segment in crossed.iter().rev() {
+                        let empty_ref = segment
+                            .ref_name()
+                            .context("Empty segment doesn't have a ref")?;
+                        let anchor = editor.select_reference(anchor_ref.as_ref())?;
+                        editor.move_reference(empty_ref, anchor, InsertSide::Above)?;
+                        anchor_ref = empty_ref.to_owned();
+                    }
+                }
+                if let Some(ws_meta) = ws_meta.as_mut() {
+                    move_branch_in_metadata(ws_meta, subject_branch_name, target_branch_name);
+                }
+                return Ok(Outcome {
+                    rebase: editor.rebase()?,
+                    ws_meta,
+                    new_tip: None,
+                    branch_stack_order: None,
+                });
+            }
         }
 
         let mut editor = successful_rebase.into_editor();
@@ -448,12 +542,16 @@ pub(super) mod function {
             Some(workspace_head),
         )?;
 
-        let skip_reconnect_step = source_stack.segments.len() == 1;
+        let reconnect = if source_stack.segments.len() == 1 {
+            Reconnect::Skip
+        } else {
+            Reconnect::Heal
+        };
         editor.disconnect_range_from(
             subject_delimiter.clone(),
             children_to_disconnect,
             parents_to_disconnect,
-            skip_reconnect_step,
+            reconnect,
         )?;
         editor.insert_range(
             target_selector,
@@ -475,22 +573,60 @@ pub(super) mod function {
         })
     }
 
+    /// The position of the segment named `name` within `stack`, if any.
+    fn segment_index_in(
+        stack: &but_graph::workspace::SegmentStack,
+        name: &FullNameRef,
+    ) -> Option<usize> {
+        stack
+            .segments
+            .iter()
+            .position(|segment| segment.ref_name() == Some(name))
+    }
+
+    /// The segments a reorder of `subject` onto `target` crosses within `stack`: strictly
+    /// between the two, in stack order, exclusive of both. Shared by both move modes.
+    fn crossed_segments<'a>(
+        stack: &'a but_graph::workspace::SegmentStack,
+        subject_branch_name: &FullNameRef,
+        target_branch_name: &FullNameRef,
+    ) -> anyhow::Result<&'a [but_graph::workspace::Segment]> {
+        let subject_index = segment_index_in(stack, subject_branch_name)
+            .context("BUG: subject segment missing from its source stack")?;
+        let target_index = segment_index_in(stack, target_branch_name)
+            .context("BUG: target segment missing from the source stack")?;
+        Ok(if target_index < subject_index {
+            stack
+                .segments
+                .get(target_index..subject_index)
+                .unwrap_or(&[])
+        } else {
+            stack
+                .segments
+                .get(subject_index + 1..target_index)
+                .unwrap_or(&[])
+        })
+    }
+
     /// A segment and its container stack.
     type WorkspaceSegmentContext = (
-        but_graph::workspace::Stack,
-        but_graph::workspace::StackSegment,
+        but_graph::workspace::SegmentStack,
+        but_graph::workspace::Segment,
     );
 
     type WorkspaceSegmentContextRef<'a> = (
-        &'a but_graph::workspace::Stack,
-        &'a but_graph::workspace::StackSegment,
+        &'a but_graph::workspace::SegmentStack,
+        &'a but_graph::workspace::Segment,
     );
 
     fn own_context<'a>(ctx: WorkspaceSegmentContextRef<'a>) -> WorkspaceSegmentContext {
         (ctx.0.to_owned(), ctx.1.to_owned())
     }
 
-    fn same_stack(left: &but_graph::workspace::Stack, right: &but_graph::workspace::Stack) -> bool {
+    fn same_stack(
+        left: &but_graph::workspace::SegmentStack,
+        right: &but_graph::workspace::SegmentStack,
+    ) -> bool {
         left.segments.len() == right.segments.len()
             && left
                 .segments
@@ -499,17 +635,13 @@ pub(super) mod function {
                 .all(|(left, right)| left.ref_name() == right.ref_name())
     }
 
-    fn stack_branch_order(stack: &but_graph::workspace::Stack) -> Vec<gix::refs::FullName> {
-        stack
-            .segments
-            .iter()
-            .filter_map(|segment| segment.ref_name().map(ToOwned::to_owned))
-            .collect()
+    fn stack_branch_order(stack: &but_graph::workspace::SegmentStack) -> Vec<gix::refs::FullName> {
+        stack.segment_names().map(ToOwned::to_owned).collect()
     }
 
     fn reordered_entrypoint(
         entrypoint: Option<&FullNameRef>,
-        stack: &but_graph::workspace::Stack,
+        stack: &but_graph::workspace::SegmentStack,
         new_order: &[gix::refs::FullName],
     ) -> Option<gix::refs::FullName> {
         let entrypoint = entrypoint?;
@@ -570,7 +702,7 @@ pub(super) mod function {
     ///
     /// Mirrors the [`Position::Above`](crate::branch::create_reference::Position) case of
     /// `create_reference`'s `insert_into_branch_stack_order`: `subject` is removed and re-inserted
-    /// at `target`'s slot, pushing `target` (and everything below it) down.
+    /// at `target`'s position, pushing `target` (and everything below it) down.
     ///
     /// If `target` isn't tracked yet (stale or empty metadata) it is appended first, so that a move
     /// where *both* branches are missing adds them both - `subject` on top of `target` - instead of

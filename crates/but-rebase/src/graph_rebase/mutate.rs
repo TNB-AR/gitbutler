@@ -14,18 +14,18 @@ use but_core::RefMetadata;
 use serde::{Deserialize, Serialize};
 
 use crate::graph_rebase::selector::{SelectorSet, SomeSelectors, StepRange};
-use crate::graph_rebase::{Editor, Selector, Step, ToSelector};
+use crate::graph_rebase::{Editor, Selector, Step, ToReferenceSelector, ToSelector};
 
 /// Edge positions captured at one instant (a frame), looked up later against parent arrays
 /// that have since shifted. `current` maps a captured position to today's parent number;
 /// removals and inserts are noted so later lookups stay aligned. `None` means the named
 /// edge itself was already removed.
 #[derive(Default)]
-struct NumberLedger {
+struct NumberTranslation {
     map: HashMap<PickIndex, Vec<Option<usize>>>,
 }
 
-impl NumberLedger {
+impl NumberTranslation {
     /// Today's parent number of the edge captured as `(source, frame_number)`, or `None` if it was
     /// removed. The identity map is built lazily, so a source must be looked up before any
     /// of its parent numbers mutate.
@@ -131,6 +131,16 @@ pub enum InsertSide {
 #[cfg(feature = "export-schema")]
 but_schemars::register_sdk_type!(InsertSide);
 
+/// What happens to the edges a disconnect severs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reconnect {
+    /// Rewire the disconnected children onto the disconnected parents, healing the
+    /// graph around the removed range.
+    Heal,
+    /// Leave children and parents apart; the caller reconnects them itself.
+    Skip,
+}
+
 /// Controls where reparented insertion-location parents are ordered relative to
 /// existing parents on the range.
 #[derive(Debug, Clone)]
@@ -140,6 +150,14 @@ pub enum ParentReparentingOrder {
     Prepend,
     /// Existing parents keep the lowest parent orders; reparented parents append after them.
     Append,
+}
+
+/// The two `RefIndex` lists the child reconnect re-places: the ref children that ride the
+/// range onto the pick, and the carried parent tops their stacks land above. Bundled so the
+/// two same-typed slices can't be transposed at the call.
+struct ReconnectRefs<'a> {
+    moving_ref_children: &'a [RefIndex],
+    carried_parent_tops: &'a [RefIndex],
 }
 
 /// Operations for mutating the editor graph
@@ -184,11 +202,27 @@ impl<M: RefMetadata> Editor<'_, M> {
         None
     }
 
+    /// Debug builds verify well-formedness at every public mutation exit, so an ill-formed
+    /// graph is caught at the mutation that produced it rather than at the next rebase.
+    /// Release builds rely on the `rebase()`/creation boundary checks.
+    fn verified<T>(&self, out: Result<T>) -> Result<T> {
+        #[cfg(debug_assertions)]
+        if out.is_ok() {
+            crate::graph_rebase::positions::assert_positions_total(&self.graph)?;
+        }
+        out
+    }
+
     /// Replace the step at `target`, returning the old one. Replacing a pick with another
     /// pick records a commit mapping from the old to the new id. Replacement stays within
     /// its namespace: a pick can become a pick or a tombstone, a reference can be renamed
     /// or deleted — never one into the other.
     pub fn replace(&mut self, target: impl ToSelector, step: Step) -> Result<Step> {
+        let out = self.replace_impl(target, step);
+        self.verified(out)
+    }
+
+    fn replace_impl(&mut self, target: impl ToSelector, step: Step) -> Result<Step> {
         let target = target.to_selector(self)?;
         let old = self.graph.step_view(target.id);
         if let (Step::Pick(from), Step::Pick(to)) = (&old, &step)
@@ -226,23 +260,79 @@ impl<M: RefMetadata> Editor<'_, M> {
         Ok(old)
     }
 
+    /// Disconnect a range from ALL of its surroundings, rewiring the disconnected
+    /// children onto the disconnected parents. The common form of
+    /// [`Self::disconnect_range_from`]. Internal: the only callers are `remove_commit`
+    /// and `move_reference`; kept `pub(crate)` rather than exposed on the public surface.
+    pub(crate) fn disconnect_range<C, P>(&mut self, target: StepRange<C, P>) -> Result<()>
+    where
+        C: ToSelector,
+        P: ToSelector,
+    {
+        self.disconnect_range_from(target, SelectorSet::All, SelectorSet::All, Reconnect::Heal)
+    }
+
+    /// Remove a commit node: the graph heals around it (its children reconnect to its
+    /// parents) and its step is nulled. The commit leaves the rebuild entirely — used
+    /// where its content already lives elsewhere (squashed into another commit) or is
+    /// being discarded.
+    ///
+    /// `remove_commit` deletes a commit; [`Self::detach`] severs a link between two
+    /// commits that both survive.
+    pub fn remove_commit(&mut self, node: impl ToSelector) -> Result<()> {
+        let node = node.to_selector(self)?;
+        self.disconnect_range(StepRange {
+            child: node,
+            parent: node,
+        })?;
+        self.replace(node, Step::None)?;
+        Ok(())
+    }
+
     /// Disconnect a range (child and parent may be the same entry) from its surroundings:
     /// children from `target.child`, parents from `target.parent`. `SelectorSet::All`
     /// disconnects everything; a `Some` set must name direct children/parents or this
-    /// errors. Disconnected children are reconnected to the disconnected parents unless
-    /// `skip_reconnect_step` is set — which is also the only way `parents_to_disconnect`
-    /// may be `SelectorSet::None`.
+    /// errors. [`Reconnect::Heal`] rewires the disconnected children onto the disconnected
+    /// parents; [`Reconnect::Skip`] leaves them apart — which is also the only mode where
+    /// `parents_to_disconnect` may be `SelectorSet::None`.
     pub fn disconnect_range_from<C, P>(
         &mut self,
         target: StepRange<C, P>,
         children_to_disconnect: SelectorSet,
         parents_to_disconnect: SelectorSet,
-        skip_reconnect_step: bool,
+        reconnect: Reconnect,
     ) -> Result<()>
     where
         C: ToSelector,
         P: ToSelector,
     {
+        let out = self.disconnect_range_from_impl(
+            target,
+            children_to_disconnect,
+            parents_to_disconnect,
+            reconnect,
+        );
+        self.verified(out)
+    }
+
+    // The complexity epicenter of the editor. Correctness here rests on STATEMENT ORDERING
+    // that is documented but not type-enforced ("connect BEFORE the range gains its own
+    // downward edge", "capture edges BEFORE adding the new edge"): reorder two statements and
+    // the carry/position corruption is caught only by the debug per-mutation assert or, late,
+    // at the rebase boundary — never at the offending edit. The long-term hardening is typed
+    // phase-result structs carrying that ordering instead of threaded Vec/Option args.
+    fn disconnect_range_from_impl<C, P>(
+        &mut self,
+        target: StepRange<C, P>,
+        children_to_disconnect: SelectorSet,
+        parents_to_disconnect: SelectorSet,
+        reconnect: Reconnect,
+    ) -> Result<()>
+    where
+        C: ToSelector,
+        P: ToSelector,
+    {
+        let skip_reconnect_step = matches!(reconnect, Reconnect::Skip);
         let StepRange { child, parent } = target;
         let mut target_child = child.to_selector(self)?;
         let mut target_parent = parent.to_selector(self)?;
@@ -298,7 +388,7 @@ impl<M: RefMetadata> Editor<'_, M> {
                     Some(Vec::new())
                 } else {
                     return Err(anyhow!(
-                        "Invalid parents to disconnect: SelectorSet::None is not allowed"
+                        "Invalid parents to disconnect: SelectorSet::None requires Reconnect::Skip"
                     ));
                 }
             }
@@ -405,15 +495,15 @@ impl<M: RefMetadata> Editor<'_, M> {
                 .collect::<HashSet<_>>()
         });
 
-        // One ledger spans both disconnect phases: the overlap case (the range's parent-most
+        // One translation spans both disconnect phases: the overlap case (the range's parent-most
         // sitting directly above the child-most's pick) captures the same edge in both frames.
-        let mut ledger = NumberLedger::default();
+        let mut numbers = NumberTranslation::default();
         // 2. Disconnect parents.
         let (disconnected_parent_edges, carried_parent_tops) = self.disconnect_range_parents(
             parent_node,
             outgoing_edges,
             parent_ids_to_disconnect.as_ref(),
-            &mut ledger,
+            &mut numbers,
         )?;
         // 3. Disconnect children and reconnect to the disconnected parents.
         self.disconnect_range_children(
@@ -422,10 +512,12 @@ impl<M: RefMetadata> Editor<'_, M> {
             child_ids_to_disconnect.as_ref(),
             child_ref_edges.as_ref(),
             child_ref_depth,
-            &moving_ref_children,
-            &carried_parent_tops,
+            ReconnectRefs {
+                moving_ref_children: &moving_ref_children,
+                carried_parent_tops: &carried_parent_tops,
+            },
             &disconnected_parent_edges,
-            &mut ledger,
+            &mut numbers,
             skip_reconnect_step,
         );
         // 4. Re-adopt references left dangling on the range.
@@ -445,7 +537,7 @@ impl<M: RefMetadata> Editor<'_, M> {
         parent_node: PickIndex,
         outgoing_edges: Vec<(usize, PickIndex)>,
         parent_ids_to_disconnect: Option<&HashSet<PickIndex>>,
-        ledger: &mut NumberLedger,
+        numbers: &mut NumberTranslation,
     ) -> Result<(Vec<(usize, PickIndex)>, Vec<RefIndex>)> {
         let mut disconnected_parent_edges: Vec<(usize, PickIndex)> = Vec::new();
         let mut carried_parent_tops: Vec<RefIndex> = Vec::new();
@@ -453,10 +545,10 @@ impl<M: RefMetadata> Editor<'_, M> {
             let should_disconnect =
                 parent_ids_to_disconnect.is_none_or(|ids| ids.contains(&edge_target));
             if should_disconnect {
-                // The ledger resolves the captured name to today's parent number (earlier removals
+                // The translation resolves the captured name to today's parent number (earlier removals
                 // shift edges down). Shifts preserve relative order, so the recorded parent numbers
                 // still sort the disconnected parents as their captured orders did.
-                let parent_number = ledger
+                let parent_number = numbers
                     .current(&self.graph, parent_node, frame_number)
                     .context("BUG: disconnected parent edge vanished")?;
                 let removed = (parent_node, parent_number);
@@ -483,7 +575,7 @@ impl<M: RefMetadata> Editor<'_, M> {
                     carried_parent_tops.push(top);
                 }
                 self.graph.remove_parent(parent_node, parent_number);
-                ledger.note_remove(parent_node, parent_number);
+                numbers.note_remove(parent_node, parent_number);
                 disconnected_parent_edges.push((parent_number, edge_target));
             }
         }
@@ -495,7 +587,7 @@ impl<M: RefMetadata> Editor<'_, M> {
     /// `skip_reconnect_step`), then move the groups that rode the range onto the first
     /// disconnected parent. A `Some` `child_ref_edges` means the range's child bound was a
     /// reference and holds the edges entering its group.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn disconnect_range_children(
         &mut self,
         child_node: PickIndex,
@@ -503,10 +595,9 @@ impl<M: RefMetadata> Editor<'_, M> {
         child_ids_to_disconnect: Option<&HashSet<PickIndex>>,
         child_ref_edges: Option<&Vec<(PickIndex, usize)>>,
         child_ref_depth: Option<usize>,
-        moving_ref_children: &[RefIndex],
-        carried_parent_tops: &[RefIndex],
+        reconnect: ReconnectRefs<'_>,
         disconnected_parent_edges: &[(usize, PickIndex)],
-        ledger: &mut NumberLedger,
+        numbers: &mut NumberTranslation,
         skip_reconnect_step: bool,
     ) {
         let full_child_disconnect = child_ids_to_disconnect.is_none();
@@ -520,9 +611,10 @@ impl<M: RefMetadata> Editor<'_, M> {
             if !should_disconnect {
                 continue;
             }
-            // Earlier removals on the same child shift this edge down; the ledger resolves the
+            // Earlier removals on the same child shift this edge down; the translation resolves the
             // captured name to the parent number the store uses now.
-            let Some(parent_number) = ledger.current(&self.graph, edge_source, frame_number) else {
+            let Some(parent_number) = numbers.current(&self.graph, edge_source, frame_number)
+            else {
                 // The parent loop already removed this edge: the range bounds can name
                 // overlapping edges when the range's parent-most sits directly above
                 // the child-most's pick. Only the reconnect still applies.
@@ -553,14 +645,14 @@ impl<M: RefMetadata> Editor<'_, M> {
                 for (offset, target) in targets.enumerate() {
                     self.graph
                         .insert_parent(edge_source, parent_number + 1 + offset, target);
-                    ledger.note_insert(edge_source, parent_number + 1 + offset);
+                    numbers.note_insert(edge_source, parent_number + 1 + offset);
                 }
                 continue;
             }
             // Remove the child edge; groups it carried lose it from their derived
             // entering set automatically.
             self.graph.remove_parent(edge_source, parent_number);
-            ledger.note_remove(edge_source, parent_number);
+            numbers.note_remove(edge_source, parent_number);
             if skip_reconnect_step {
                 continue;
             }
@@ -572,7 +664,7 @@ impl<M: RefMetadata> Editor<'_, M> {
         // reference child bound means the range INCLUDES that reference and its group
         // at or below its rank — those stay with the range.
         if let Some(pick) = group_pick {
-            for moving_node in moving_ref_children {
+            for moving_node in reconnect.moving_ref_children {
                 transfer_stack(&mut self.graph, *moving_node, child_node, pick);
             }
         }
@@ -585,7 +677,7 @@ impl<M: RefMetadata> Editor<'_, M> {
                     // group; step 3's reconnect added fresh edges into `pick`. The combined
                     // stack now sits behind all of those fresh edges (`GroupCarry::All`), which
                     // is also right when `pick` is a merge.
-                    let landed = carried_parent_tops.first().is_some_and(|&top| {
+                    let landed = reconnect.carried_parent_tops.first().is_some_and(|&top| {
                         land_stack_above(&mut self.graph, child_node, top, pick)
                     });
                     if !landed {
@@ -664,6 +756,28 @@ impl<M: RefMetadata> Editor<'_, M> {
     /// whether newly connected parents go before or after existing parents on the range's
     /// parent-most entry.
     pub fn insert_range_into<C, P>(
+        &mut self,
+        target: impl ToSelector,
+        range: StepRange<C, P>,
+        side: InsertSide,
+        nodes_to_connect: Option<SomeSelectors>,
+        parent_reparenting_order: ParentReparentingOrder,
+    ) -> Result<()>
+    where
+        C: ToSelector,
+        P: ToSelector,
+    {
+        let out = self.insert_range_into_impl(
+            target,
+            range,
+            side,
+            nodes_to_connect,
+            parent_reparenting_order,
+        );
+        self.verified(out)
+    }
+
+    fn insert_range_into_impl<C, P>(
         &mut self,
         target: impl ToSelector,
         range: StepRange<C, P>,
@@ -760,9 +874,29 @@ impl<M: RefMetadata> Editor<'_, M> {
                 SplitBoundary::Above,
                 child_pick,
             );
-            if !split.moved_any {
-                // The group's edges now enter through the range's child-most pick.
-                redirect_edges(&mut self.graph, &target_edges, pick, child_pick);
+            // The group's edges now enter through the range's child-most pick — directly
+            // when the target topped its group, or through the members that rode above the
+            // range (they carry their edge statements verbatim, so the arena edges must
+            // follow them or the range is silently bypassed).
+            redirect_edges(&mut self.graph, &target_edges, pick, child_pick);
+            // The moved slice lands on the child-most pick, which may already host the
+            // range's own ref chain: hang the slice on that chain's top so both form one
+            // stack. This runs AFTER the redirect — the slice's carries were copied
+            // mid-surgery against stale edges, so only now can the placement fold them
+            // onto a resolve-equal chain instead of leaving colliding twins.
+            if let Some(boundary) = split.boundary {
+                let top_below = self
+                    .graph
+                    .positioned_refs()
+                    .filter(|&entry| self.graph.is_reference(entry))
+                    .filter(|entry| !split.moved.contains(entry))
+                    .filter(|&entry| {
+                        positions::resolve_to_pick(&self.graph, entry) == Some(child_pick)
+                    })
+                    .max_by_key(|&entry| positions::ref_depth(&self.graph, entry));
+                if let Some(top) = top_below {
+                    self.graph.set_below(boundary, Some(top));
+                }
             }
             // Connect the parent-most entry to the reference's pick; a reference
             // parent-most (an empty range) re-points instead of gaining edges. The
@@ -937,6 +1071,30 @@ impl<M: RefMetadata> Editor<'_, M> {
         self.insert_range_into(target, range, side, None, ParentReparentingOrder::Prepend)
     }
 
+    /// Move the positioned reference `subject` to sit `side` of `target` — above or below
+    /// another reference, or onto a commit's stack — without touching any commit.
+    ///
+    /// This is the single-reference form of disconnecting a one-entry range and reinserting
+    /// it: the reference leaves its group (members above close the gap, carried edges heal
+    /// onto its old pick) and re-anchors at the target.
+    pub fn move_reference(
+        &mut self,
+        subject: impl ToReferenceSelector,
+        target: impl ToSelector,
+        side: InsertSide,
+    ) -> Result<()> {
+        let subject = subject.to_reference_selector(self)?;
+        if !self.graph.is_positioned(subject.id) {
+            bail!("Can only move a reference that holds a position");
+        }
+        let range = StepRange {
+            child: subject,
+            parent: subject,
+        };
+        self.disconnect_range(range.clone())?;
+        self.insert_range(target, range, side)
+    }
+
     /// Add a step to the graph, unconnected. Almost always you want [`Self::insert`] instead.
     pub fn add_step(&mut self, step: Step) -> Result<Selector> {
         let new_idx = add_step_to_graph(&mut self.graph, step);
@@ -946,6 +1104,16 @@ impl<M: RefMetadata> Editor<'_, M> {
     /// Insert a new step relative to `target` (see [`InsertSide`] for how edges rewire),
     /// returning a selector to it.
     pub fn insert(
+        &mut self,
+        target: impl ToSelector,
+        step: Step,
+        side: InsertSide,
+    ) -> Result<Selector> {
+        let out = self.insert_impl(target, step, side);
+        self.verified(out)
+    }
+
+    fn insert_impl(
         &mut self,
         target: impl ToSelector,
         step: Step,
@@ -1087,9 +1255,9 @@ impl<M: RefMetadata> Editor<'_, M> {
 
     /// Interpose a new pick between `target` (a reference positioned `on` its pick) and that
     /// pick: split the target's group at `boundary`, rest the split-off lower part on the new
-    /// pick, and redirect the entering edges when they should now enter through it — always
-    /// for an `At` split; for an `Above` split only when nothing moved up (the target was the
-    /// group's top, so the whole group now rests on the new pick).
+    /// pick, and redirect the entering edges onto it — they enter through the new pick now,
+    /// whether the target topped its group or members rode above (riders carry their edge
+    /// statements verbatim, so the arena edges must follow or the new pick is bypassed).
     fn interpose_pick_at_ref(
         &mut self,
         target: Selector,
@@ -1110,10 +1278,8 @@ impl<M: RefMetadata> Editor<'_, M> {
         self.graph.push_parent(new_idx, pick);
         let split = split_group(&mut self.graph, target_ref, boundary, new_idx);
         settle_group_lower(&mut self.graph, &split.lower, (new_idx, 0));
-        if matches!(boundary, SplitBoundary::At) || !split.moved_any {
-            // The group's edges now enter through the new pick, parent numbers untouched.
-            redirect_edges(&mut self.graph, &target_edges, pick, new_idx);
-        }
+        // The group's edges now enter through the new pick, parent numbers untouched.
+        redirect_edges(&mut self.graph, &target_edges, pick, new_idx);
         Ok(self.new_selector(new_idx))
     }
 
@@ -1134,6 +1300,16 @@ impl<M: RefMetadata> Editor<'_, M> {
     /// reference enters its group: the pick edge goes to the pick and the reference (with
     /// members below it) gains the new edge.
     pub fn insert_edge(
+        &mut self,
+        child: impl ToSelector,
+        parent: impl ToSelector,
+        parent_number: usize,
+    ) -> Result<()> {
+        let out = self.insert_edge_impl(child, parent, parent_number);
+        self.verified(out)
+    }
+
+    fn insert_edge_impl(
         &mut self,
         child: impl ToSelector,
         parent: impl ToSelector,
@@ -1197,9 +1373,41 @@ impl<M: RefMetadata> Editor<'_, M> {
         Ok(())
     }
 
-    /// Removes all edges between a child and parent, returning the (pre-removal, ascending)
+    /// Sever all edges between a child and parent, returning the (pre-removal, ascending)
     /// parent numbers they occupied. Later parents shift down, statements following.
-    pub fn remove_edges(
+    ///
+    /// `detach` severs a link between two commits that both survive; [`Self::remove_commit`]
+    /// deletes a commit.
+    pub fn detach(
+        &mut self,
+        child: impl ToSelector,
+        parent: impl ToSelector,
+    ) -> Result<Vec<usize>> {
+        let out = self.detach_impl(child, parent);
+        self.verified(out)
+    }
+
+    /// Re-point every `child`→`from` edge onto `to`: the edges are removed and `to`
+    /// takes the LOWEST freed parent number, so the lane keeps its position. Several
+    /// freed edges collapse into one — two parallel edges to one parent are almost
+    /// always unintentional, and keeping both would merge `to` twice. Returns the
+    /// freed parent numbers; empty when no edge connected `child` to `from` (then
+    /// nothing is inserted).
+    pub fn reparent_edges(
+        &mut self,
+        child: impl ToSelector,
+        from: impl ToSelector,
+        to: impl ToSelector,
+    ) -> Result<Vec<usize>> {
+        let child = child.to_selector(self)?;
+        let removed = self.detach(child, from)?;
+        if let Some(&parent_number) = removed.iter().min() {
+            self.insert_edge(child, to, parent_number)?;
+        }
+        Ok(removed)
+    }
+
+    fn detach_impl(
         &mut self,
         child: impl ToSelector,
         parent: impl ToSelector,

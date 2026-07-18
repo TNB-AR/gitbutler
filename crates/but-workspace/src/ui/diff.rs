@@ -10,8 +10,7 @@ pub fn changes_in_branch(
     branch: &gix::refs::FullNameRef,
 ) -> anyhow::Result<ui::TreeChanges> {
     let commits = if let Some((_, segment)) = workspace.find_segment_and_stack_by_refname(branch) {
-        let base = segment.base;
-        segment.tip().zip(base)
+        segment.tip().zip(segment.base)
     } else {
         // TODO: this should be (kept) in sync with branch-listing!
         let tip = repo.find_reference(branch)?.peel_to_commit()?.id;

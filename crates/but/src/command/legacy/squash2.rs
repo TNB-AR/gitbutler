@@ -1189,7 +1189,7 @@ fn resolve_commits_on_branch(
 ) -> CliResult<(FullName, Vec<ObjectId>)> {
     let branch_name = branch.resolve_local_branch_name()?;
     let (_, segment) = ws.try_find_segment_and_stack_by_refname(branch_name.as_ref())?;
-    let commits_in_segment = segment.commits.iter().map(|commit| commit.id).collect();
+    let commits_in_segment = segment.commits.clone();
     Ok((branch_name, commits_in_segment))
 }
 

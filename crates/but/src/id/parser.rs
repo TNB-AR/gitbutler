@@ -122,8 +122,11 @@ fn get_all_files_in_display_order(ctx: &mut Context, id_map: &IdMap) -> anyhow::
     // First, files assigned to branches (they appear first in status display),
     // then uncommitted files (they appear last in status display)
     let (_guard, _, workspace, _) = ctx.workspace_and_db()?;
-    let stack_ids: Vec<Option<but_core::Id<'S'>>> =
-        workspace.stacks.iter().map(|stack| stack.id).collect();
+    let stack_ids: Vec<Option<but_core::Id<'S'>>> = workspace
+        .display_stacks()?
+        .iter()
+        .map(|stack| stack.id)
+        .collect();
     let mut positioned_files: Vec<(usize, &BStr, CliId)> = id_map
         .uncommitted_files
         .values()

@@ -485,23 +485,27 @@ impl OnWorkspaceMergeConflict {
 /// projected workspace so the merge builder can insert the anonymous tip at the same parent number,
 /// and `tip` is the commit/segment pair to merge, with no ref name attached.
 pub(crate) fn anon_stacks(
-    stacks: &[but_graph::workspace::Stack],
-) -> impl Iterator<Item = (usize, crate::commit::merge::Seed)> {
-    stacks.iter().enumerate().filter_map(|(idx, s)| {
-        if s.ref_name().is_none() {
-            s.tip_skip_empty().map(|cid| {
-                (
-                    idx,
-                    crate::commit::merge::Seed {
-                        name: None,
-                        commit_id: cid,
-                    },
-                )
-            })
-        } else {
-            None
-        }
-    })
+    segment_graph: &but_graph::workspace::SegmentGraph,
+) -> impl Iterator<Item = (usize, crate::commit::merge::Seed)> + '_ {
+    segment_graph
+        .stacks
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, s)| {
+            if s.top().is_some_and(|seg| seg.ref_name.is_none()) {
+                s.tip_skip_empty().map(|cid| {
+                    (
+                        idx,
+                        crate::commit::merge::Seed {
+                            name: None,
+                            commit_id: cid,
+                        },
+                    )
+                })
+            } else {
+                None
+            }
+        })
 }
 
 /// Ensure every metadata stack that should be merged was visible in the graph.
@@ -516,6 +520,76 @@ pub(crate) fn ensure_no_missing_stacks(
             merge.missing_stacks
         ))
     }
+}
+
+/// The standard GitButler reference-transaction edits apply and unapply build their HEAD and
+/// workspace-ref moves from. All use `PreviousValue::Any` — HEAD moves are not optimistically
+/// locked (unchanged, long-standing behavior).
+pub(crate) mod ref_edits {
+    use gix::refs::{
+        FullName, FullNameRef, Target,
+        transaction::{Change, LogChange, PreviousValue, RefEdit},
+    };
+
+    fn log(message: &str) -> LogChange {
+        LogChange {
+            mode: gix::refs::transaction::RefLog::AndReference,
+            force_create_reflog: false,
+            message: message.into(),
+        }
+    }
+
+    /// Point `HEAD` symbolically at `target`.
+    pub(crate) fn head_to_ref(target: &FullNameRef, message: &str) -> RefEdit {
+        RefEdit {
+            change: Change::Update {
+                log: log(message),
+                expected: PreviousValue::Any,
+                new: Target::Symbolic(target.to_owned()),
+            },
+            name: "HEAD".try_into().expect("well-formed root ref"),
+            deref: false,
+        }
+    }
+
+    /// Point `HEAD` (through its referent) at `id` — the detached/checkout form.
+    pub(crate) fn head_to_commit(id: gix::ObjectId, message: &str) -> RefEdit {
+        RefEdit {
+            change: Change::Update {
+                log: log(message),
+                expected: PreviousValue::Any,
+                new: Target::Object(id),
+            },
+            name: "HEAD".try_into().expect("well-formed root ref"),
+            deref: true,
+        }
+    }
+
+    /// Point `name` at `id`.
+    pub(crate) fn ref_to_commit(name: FullName, id: gix::ObjectId, message: &str) -> RefEdit {
+        RefEdit {
+            change: Change::Update {
+                log: log(message),
+                expected: PreviousValue::Any,
+                new: Target::Object(id),
+            },
+            name,
+            deref: false,
+        }
+    }
+}
+
+/// Bail when the workspace commit of `ws` is buried in history rather than at the top —
+/// the shared precondition of apply and unapply.
+pub(crate) fn ensure_workspace_commit_at_top(
+    ws: &but_graph::Workspace,
+    repo: &gix::Repository,
+) -> anyhow::Result<()> {
+    use crate::ref_info::WorkspaceExt as _;
+    if ws.has_workspace_commit_in_ancestry(repo) {
+        anyhow::bail!("Refusing to work on workspace whose workspace commit isn't at the top");
+    }
+    Ok(())
 }
 
 /// Find `branch` in `repo` and reject it if it resolves to a symbolic reference.

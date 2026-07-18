@@ -189,13 +189,23 @@ pub fn cherry_pick(
                 repo,
                 target,
                 ontos,
-                base_tree,
-                onto_tree,
-                target_tree.detach(),
+                ConflictTrees {
+                    base: base_tree,
+                    ours: onto_tree,
+                    theirs: target_tree.detach(),
+                },
                 sign_commit,
             )
         }
     }
+}
+
+/// The three input trees a conflict preserves, by role — carried as one value so their
+/// base/ours/theirs order can't be silently transposed across the merge helpers.
+struct ConflictTrees {
+    base: gix::ObjectId,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
 }
 
 /// Merge `ours`/`theirs` over `base`, write the tree, and wrap the result as `target`
@@ -204,15 +214,13 @@ fn merge_into_outcome(
     repo: &gix::Repository,
     target: but_core::Commit<'_>,
     ontos: &[gix::ObjectId],
-    base: gix::ObjectId,
-    ours: gix::ObjectId,
-    theirs: gix::ObjectId,
+    trees: ConflictTrees,
     sign_commit: SignCommit,
 ) -> Result<CherryPickOutcome> {
     let mut outcome = repo.merge_trees(
-        base,
-        ours,
-        theirs,
+        trees.base,
+        trees.ours,
+        trees.theirs,
         repo.default_merge_labels(),
         repo.merge_options_force_ours()?,
     )?;
@@ -225,9 +233,7 @@ fn merge_into_outcome(
             tree_id,
             outcome,
             conflict_kind,
-            base,
-            ours,
-            theirs,
+            trees,
             sign_commit,
         )?;
         Ok(CherryPickOutcome::ConflictedCommit(
@@ -300,9 +306,11 @@ fn maybe_materialize_conflicted_onto_merge(
         repo,
         target.clone(),
         ontos,
-        base_tree_id,
-        ours_tree_id,
-        theirs_tree_id,
+        ConflictTrees {
+            base: base_tree_id,
+            ours: ours_tree_id,
+            theirs: theirs_tree_id,
+        },
         sign_commit,
     )
     .map(Some)
@@ -466,6 +474,13 @@ fn commit_from_unconflicted_tree<'repo>(
     {
         new_commit.extra_headers.remove(pos);
     }
+    // A pick can change the parent set, so any recorded parent↔stack binding is stale.
+    if let Some(pos) = new_commit
+        .extra_headers()
+        .find_pos(but_core::commit::HEADERS_WORKSPACE_PARENTS_FIELD)
+    {
+        new_commit.extra_headers.remove(pos);
+    }
 
     new_commit.parents = parents.into();
 
@@ -479,16 +494,13 @@ fn commit_from_unconflicted_tree<'repo>(
     .attach(repo))
 }
 
-#[expect(clippy::too_many_arguments)]
 fn commit_from_conflicted_tree<'repo>(
     parents: &[gix::ObjectId],
     mut to_rebase: but_core::Commit<'repo>,
     resolved_tree_id: gix::Id<'repo>,
     cherry_pick: gix::merge::tree::Outcome<'_>,
     treat_as_unresolved: gix::merge::tree::TreatAsUnresolved,
-    base_tree_id: gix::ObjectId,
-    ours_tree_id: gix::ObjectId,
-    theirs_tree_id: gix::ObjectId,
+    trees: ConflictTrees,
     sign_commit: SignCommit,
 ) -> anyhow::Result<gix::Id<'repo>> {
     let repo = resolved_tree_id.repo;
@@ -509,17 +521,17 @@ fn commit_from_conflicted_tree<'repo>(
     tree.upsert(
         TreeKind::Ours.as_tree_entry_name(),
         EntryKind::Tree,
-        ours_tree_id,
+        trees.ours,
     )?;
     tree.upsert(
         TreeKind::Theirs.as_tree_entry_name(),
         EntryKind::Tree,
-        theirs_tree_id,
+        trees.theirs,
     )?;
     tree.upsert(
         TreeKind::Base.as_tree_entry_name(),
         EntryKind::Tree,
-        base_tree_id,
+        trees.base,
     )?;
     tree.upsert(
         TreeKind::AutoResolution.as_tree_entry_name(),
@@ -532,6 +544,14 @@ fn commit_from_conflicted_tree<'repo>(
         .headers()
         .unwrap_or_else(|| Headers::from_change_id(to_rebase.change_id()));
     headers.conflicted = None;
+    // A pick can change the parent set, so any recorded parent↔stack binding is stale.
+    if let Some(pos) = to_rebase
+        .inner
+        .extra_headers()
+        .find_pos(but_core::commit::HEADERS_WORKSPACE_PARENTS_FIELD)
+    {
+        to_rebase.inner.extra_headers.remove(pos);
+    }
     to_rebase.tree = tree.write().context("failed to write tree")?.detach();
     to_rebase.parents = parents.into();
 

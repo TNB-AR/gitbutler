@@ -45,20 +45,32 @@ mod remotes;
 mod segment_data;
 
 /// Project a PROVIDED `cg` — the write-through seam: an editor-mutated commit graph projects
-/// like a fresh walk, with enrichment (refs, target, metadata) read from `repo`/`meta` amended
-/// by `overlay` (default overlay = current state, a materialized rebase; a rebase's overlay
-/// serves pending ref edits and entrypoint from memory, a preview). Dispatches like
-/// `Graph::from_head`: managed when the workspace ref resolves to a
-/// commit in `cg` (falling through to non-managed when the entrypoint lands outside the
-/// workspace), non-managed otherwise. `None` when the entrypoint is unborn or unresolvable.
+/// like a fresh walk, with enrichment read from `repo`/`meta` amended by `overlay`. `None` when
+/// the entrypoint is unborn or unresolvable.
 pub(crate) fn workspace_from_commit_graph<T: but_core::RefMetadata>(
+    cg: CommitGraph,
+    repo: &gix::Repository,
+    meta: &T,
+    project_meta: but_core::ref_metadata::ProjectMeta,
+    options: crate::walk::Options,
+    overlay: crate::walk::Overlay,
+) -> anyhow::Result<Option<crate::workspace::Workspace>> {
+    commit_graph_for_workspace(cg, repo, meta, project_meta, options, overlay)?
+        .map(|(cg, ctx)| crate::workspace::reconcile_workspace(cg, ctx))
+        .transpose()
+}
+
+/// The shared dispatch both twins project from: re-anchor `cg` in the on-disk world (targets,
+/// remotes, HEAD), re-flag, and assemble managed or unmanaged — yielding the assembled graph
+/// and context, or `None` when there is nothing to project (unborn or out-of-graph entrypoint).
+fn commit_graph_for_workspace<T: but_core::RefMetadata>(
     mut cg: CommitGraph,
     repo: &gix::Repository,
     meta: &T,
     project_meta: but_core::ref_metadata::ProjectMeta,
     options: crate::walk::Options,
     overlay: crate::walk::Overlay,
-) -> anyhow::Result<Option<crate::Workspace>> {
+) -> anyhow::Result<Option<(CommitGraph, GraphContext)>> {
     let (overlay_repo, overlay_meta, overlay_entrypoint) = overlay.into_parts(repo, meta);
     let ws_ref: gix::refs::FullName = but_core::WORKSPACE_REF_NAME.try_into()?;
     let ws_tip_on_disk = resolve_ref_tip(&overlay_repo, ws_ref.as_ref())?;
@@ -177,8 +189,10 @@ pub(crate) fn workspace_from_commit_graph<T: but_core::RefMetadata>(
             &overlay_repo,
             &overlay_meta,
             &ws_ref,
-            ws_commit,
-            entrypoint,
+            WorkspaceAnchors {
+                tip: ws_commit,
+                entrypoint,
+            },
             entrypoint_ref,
             main_head_ref.as_ref(),
             project_meta.clone(),
@@ -189,7 +203,7 @@ pub(crate) fn workspace_from_commit_graph<T: but_core::RefMetadata>(
         // the managed attempt touched (refs re-refreshed, layout re-authored), and the stray
         // managed-ws mark is only ever read for the entrypoint, provably a different commit here.
         if entrypoint_reached {
-            return crate::workspace::project_workspace(managed_cg, ctx).map(Some);
+            return Ok(Some((managed_cg, ctx)));
         }
         cg = managed_cg;
     }
@@ -210,7 +224,7 @@ pub(crate) fn workspace_from_commit_graph<T: but_core::RefMetadata>(
         project_meta,
         options,
     )?;
-    crate::workspace::project_workspace(cg, ctx).map(Some)
+    Ok(Some((cg, ctx)))
 }
 
 /// Build the managed-workspace's ref layout and context onto its `CommitGraph`, deriving the
@@ -253,8 +267,10 @@ pub fn graph_from_repository<T: but_core::RefMetadata>(
         &overlay_repo,
         &overlay_meta,
         &ws_ref,
-        ws_commit,
-        ep,
+        WorkspaceAnchors {
+            tip: ws_commit,
+            entrypoint: ep,
+        },
         entrypoint_ref,
         walk_ref.as_ref(),
         project_meta,
@@ -347,8 +363,10 @@ pub(crate) fn graph_from_repository_seeds<T: but_core::RefMetadata>(
             &overlay_repo,
             &overlay_meta,
             &ws_ref,
-            ws_commit,
-            entrypoint,
+            WorkspaceAnchors {
+                tip: ws_commit,
+                entrypoint,
+            },
             ep_ref,
             entrypoint_ref.as_ref(),
             project_meta,
@@ -400,8 +418,7 @@ fn assemble_managed<T: but_core::RefMetadata>(
     overlay_repo: &OverlayRepo<'_>,
     overlay_meta: &OverlayMetadata<'_, T>,
     ws_ref: &gix::refs::FullName,
-    ws_commit: gix::ObjectId,
-    entrypoint: gix::ObjectId,
+    anchors: WorkspaceAnchors,
     entrypoint_ref: Option<gix::refs::FullName>,
     main_head_ref: Option<&gix::refs::FullName>,
     project_meta: but_core::ref_metadata::ProjectMeta,
@@ -409,23 +426,30 @@ fn assemble_managed<T: but_core::RefMetadata>(
 ) -> anyhow::Result<(CommitGraph, GraphContext, bool)> {
     // Two candidates, usually the same commit: the facts' managed-merge check reads the
     // workspace tip, the ref layout's ws anchor reads the (checkout) entrypoint.
-    cg.mark_managed_ws_commit_by_message(repo, ws_commit);
-    cg.mark_managed_ws_commit_by_message(repo, entrypoint);
+    cg.mark_managed_ws_commit_by_message(repo, anchors.tip);
+    cg.mark_managed_ws_commit_by_message(repo, anchors.entrypoint);
     let ws_meta = overlay_meta.workspace(ws_ref.as_ref())?;
     let stack_branches = in_workspace_stack_branches(&ws_meta);
+    let stack_partition = in_workspace_stack_partition(&ws_meta)?;
     let inputs = enrichment_inputs(repo, overlay_repo, &project_meta, main_head_ref)?;
-    assemble(
+    let (mut cg, ctx, entrypoint_reached) = assemble(
         cg,
         overlay_repo,
         overlay_meta,
-        ws_commit,
-        entrypoint,
+        anchors,
         entrypoint_ref,
         Some(&stack_branches),
         inputs,
         project_meta,
         options,
-    )
+    )?;
+    // The declared stack partition is pure metadata — stamp it onto the stored layout after
+    // the graph-derived layout is built, giving the ref→stack partition one home the
+    // projection reads instead of re-consulting the workspace metadata.
+    if let Some(layout) = cg.layout.as_mut() {
+        layout.stacks = stack_partition;
+    }
+    Ok((cg, ctx, entrypoint_reached))
 }
 
 /// Assemble the NON-managed graph from `cg`: no stack or workspace-ref passes, plus the
@@ -447,8 +471,10 @@ fn assemble_unmanaged<T: but_core::RefMetadata>(
         cg,
         overlay_repo,
         overlay_meta,
-        head_tip,
-        head_tip,
+        WorkspaceAnchors {
+            tip: head_tip,
+            entrypoint: head_tip,
+        },
         entrypoint_ref,
         None,
         inputs,
@@ -456,6 +482,15 @@ fn assemble_unmanaged<T: but_core::RefMetadata>(
         options,
     )?;
     Ok((cg, ctx))
+}
+
+/// The two workspace anchor commits, usually equal: the facts' managed-merge check reads
+/// `tip`; the ref layout's workspace anchor reads the checkout `entrypoint`. Bundled so the
+/// pair can't be transposed across the assembly helpers.
+#[derive(Clone, Copy)]
+struct WorkspaceAnchors {
+    tip: gix::ObjectId,
+    entrypoint: gix::ObjectId,
 }
 
 /// The build pipeline both entries share: plan, author the segments, apply persisted
@@ -470,8 +505,7 @@ fn assemble<T: but_core::RefMetadata>(
     mut cg: CommitGraph,
     overlay_repo: &OverlayRepo<'_>,
     overlay_meta: &OverlayMetadata<'_, T>,
-    workspace_commit: gix::ObjectId,
-    entrypoint: gix::ObjectId,
+    anchors: WorkspaceAnchors,
     entrypoint_ref: Option<gix::refs::FullName>,
     stack_branches: Option<&[Vec<gix::refs::FullName>]>,
     inputs: EnrichmentInputs,
@@ -491,8 +525,8 @@ fn assemble<T: but_core::RefMetadata>(
     )?;
     let b = BuildInputs {
         cg: &cg,
-        workspace_commit,
-        entrypoint,
+        workspace_commit: anchors.tip,
+        entrypoint: anchors.entrypoint,
         entrypoint_ref: entrypoint_ref.as_ref(),
         target: inputs.target,
         remote_tracking: &inputs.remote_tracking,
@@ -684,6 +718,30 @@ fn in_workspace_stack_branches(
                 .map(|b| b.ref_name.clone())
                 .filter(|b| seen_branches.insert(b.clone()))
                 .collect()
+        })
+        .collect()
+}
+
+/// The declared in-workspace stack partition: each in-workspace stack's id and its branch
+/// names in declared (tip→base) order, empty branches included. Mirrors the projection's
+/// `in_ws_stacks` (`ws.stacks` filtered to in-workspace) with NO cross-stack dedup, so the
+/// stored layout carries the exact partition the claiming needs — unlike
+/// [`in_workspace_stack_branches`], which dedups across stacks for the walk's segment authoring.
+fn in_workspace_stack_partition(
+    ws: &but_core::ref_metadata::Workspace,
+) -> anyhow::Result<Vec<crate::ref_layout::StackPartition>> {
+    ws.stacks
+        .iter()
+        .filter(|s| s.is_in_workspace())
+        .map(|s| {
+            // A DECLARING stack must be well-formed to enter the layout at all; chains
+            // keep their legacy tolerance inside `validate_structure`.
+            s.validate_structure()?;
+            Ok(crate::ref_layout::StackPartition {
+                id: s.id,
+                branches: s.branches.iter().map(|b| b.ref_name.clone()).collect(),
+                parent_edges: s.parent_edges(),
+            })
         })
         .collect()
 }

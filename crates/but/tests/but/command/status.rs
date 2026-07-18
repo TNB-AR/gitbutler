@@ -662,8 +662,7 @@ Applied remote branch 'origin/document-but-pr-skill' to workspace
 ┊╭┄do [document-but-pr-skill] (merged upstream) (no commits)
 ├╯
 ┊
-┊● 55165db (upstream) ⏫ 1 commit
-├╯ 55165db (common base) 2000-01-02 merge document-but-pr-skill
+┴ 55165db (common base) 2000-01-02 merge document-but-pr-skill
 
 Hint: branches marked `(merged upstream)` have landed; run `but pull` to remove them, or start new work on another branch
 

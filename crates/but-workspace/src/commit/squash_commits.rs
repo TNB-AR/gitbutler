@@ -2,13 +2,9 @@
 
 use anyhow::{Result, bail};
 use but_core::{RefMetadata, RepositoryExt};
-use but_rebase::{
-    commit::DateMode,
-    graph_rebase::{
-        Editor, LookupStep as _, Selector, Step, SuccessfulRebase, ToCommitSelector,
-        merge_commit_changes::MergeCommitChangesOutcome,
-        selector::{SelectorSet, StepRange},
-    },
+use but_rebase::graph_rebase::{
+    Editor, LookupStep as _, Selector, Step, SuccessfulRebase, ToCommitSelector,
+    merge_commit_changes::MergeCommitChangesOutcome,
 };
 
 /// The result of a squash_commits operation.
@@ -59,14 +55,12 @@ fn construct_new_squashed_commit<'meta, M: RefMetadata>(
     let (target_selector, target_commit) = editor.find_selectable_commit(target_commit_id)?;
     let target_parent_ids = parent_commit_ids(&editor, target_selector)?;
 
-    let new_commit = {
-        let mut squashed_commit = target_commit.clone();
-        squashed_commit.inner.parents = target_parent_ids.into();
-        squashed_commit.tree = squashed_tree.tree_id;
-        squashed_commit.message = combined_message.into();
-        editor.new_commit(squashed_commit, DateMode::CommitterUpdateAuthorKeep)?
-    };
-
+    let new_commit = editor.new_squashed_commit(
+        target_commit.clone(),
+        target_parent_ids,
+        squashed_tree,
+        combined_message,
+    )?;
     editor.replace(target_selector, Step::new_pick(new_commit))?;
 
     Ok((editor, target_selector))
@@ -199,13 +193,7 @@ pub fn squash_commits<'meta, M: RefMetadata, S: ToCommitSelector, T: ToCommitSel
 
     let mut editor = editor;
     for commit_selector in subject_selectors {
-        let range = StepRange {
-            child: commit_selector,
-            parent: commit_selector,
-        };
-        editor.disconnect_range_from(range, SelectorSet::All, SelectorSet::All, false)?;
-        let (selector, _) = editor.find_selectable_commit(commit_selector)?;
-        editor.replace(selector, Step::None)?;
+        editor.remove_commit(commit_selector)?;
     }
 
     let (editor, new_target_selector) = construct_new_squashed_commit(

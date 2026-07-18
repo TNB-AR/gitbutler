@@ -110,15 +110,20 @@ pub(super) fn segment_ahead_region(
     let is_boundary =
         |c: gix::ObjectId| region.is_shape_boundary(cg, remote_tip, pinned_commits, c);
     // Merge-heavy regions make nearly every commit a tip, and a per-tip store scan is
-    // quadratic (20s on an 80k-commit repo) — index first commits up front instead.
-    let mut first_commit_sidx: IdMap<usize> = IdMap::default();
+    // quadratic (20s on an 80k-commit repo) — index owned commits up front instead.
+    // EVERY owned commit counts, not just segment heads: a region boundary can land
+    // mid-run of an advanced-outside segment, and re-minting its tail would
+    // materialize those commits twice (one name, one reference).
+    let mut owned_commit_sidx: IdMap<usize> = IdMap::default();
     let mut remote_first_commits: IdSet = IdSet::default();
     for (sidx, seg) in store.segments.iter().enumerate() {
-        if let Some(&first) = seg.commits.first() {
-            first_commit_sidx.entry(cg.id_at(first)).or_insert(sidx);
-            if store.is_remote_segment(sidx) {
-                remote_first_commits.insert(cg.id_at(first));
-            }
+        for &h in &seg.commits {
+            owned_commit_sidx.entry(cg.id_at(h)).or_insert(sidx);
+        }
+        if let Some(&first) = seg.commits.first()
+            && store.is_remote_segment(sidx)
+        {
+            remote_first_commits.insert(cg.id_at(first));
         }
     }
 
@@ -170,7 +175,7 @@ pub(super) fn segment_ahead_region(
             ahead_owner.insert(cg.id_at(c), tip);
         }
         let is_root = tip == remote_tip;
-        if !is_root && let Some(&existing) = first_commit_sidx.get(&tip) {
+        if !is_root && let Some(&existing) = owned_commit_sidx.get(&tip) {
             ahead_sidx.insert(tip, existing);
             reused.insert(tip);
             continue;
@@ -206,8 +211,8 @@ pub(super) fn segment_ahead_region(
             let cut_ref = cut_ref.clone();
             store.link_remote_to_local(sidx, &cut_ref, remote_tracking);
         }
-        if let Some(&first) = store.segments[sidx].commits.first() {
-            first_commit_sidx.entry(cg.id_at(first)).or_insert(sidx);
+        for &h in &store.segments[sidx].commits {
+            owned_commit_sidx.entry(cg.id_at(h)).or_insert(sidx);
         }
         ahead_sidx.insert(tip, sidx);
     }

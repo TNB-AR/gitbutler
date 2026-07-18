@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::ref_layout::StackPartition;
 use crate::workspace::{GraphContext, Stack, StackCommit, StackSegment};
 use crate::{CommitGraph, RefInfo};
 use but_core::ref_metadata;
@@ -10,7 +11,7 @@ use but_core::ref_metadata;
 /// How the view anchors; only these three states are legal (a managed COMMIT implies a
 /// managed ref).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ViewAnchor {
+pub(super) enum ViewAnchor {
     /// The anchor is a managed workspace merge commit (with metadata).
     ManagedCommit,
     /// A managed workspace REF exists, but its commit is missing or unmanaged.
@@ -20,7 +21,7 @@ enum ViewAnchor {
 }
 
 impl ViewAnchor {
-    fn new(managed_commit: bool, has_managed_ref: bool) -> Self {
+    pub(super) fn new(managed_commit: bool, has_managed_ref: bool) -> Self {
         if managed_commit {
             debug_assert!(has_managed_ref, "a managed commit implies a managed ref");
             Self::ManagedCommit
@@ -44,16 +45,18 @@ impl ViewAnchor {
     }
 }
 
-/// Derive the workspace's stacks from the layout the builder stored on `cg` and the
-/// workspace metadata's stack lists.
+/// Derive the workspace's stacks from the layout the builder stored on `cg`: its ref
+/// groups AND its declared stack partition ([`StackPartition`]).
 ///
 /// The parent array drives: one stack per materialized parent, in parent order —
 /// metadata-less parents included. A parent claiming a ref chain (matched by the
-/// chain's top position) gets its seed-born empty branches from the metadata list,
-/// which is what the stored layout cannot carry. Positioned naming refs carve the
-/// commit runs; another chain's naming ref ends a stack's territory, while chainless
-/// naming refs (a reachable target local, say) become segments within the reaching
-/// stack. `lower_bound` is the workspace frame's bound.
+/// chain's top position) gets its seed-born empty branches from that stored partition —
+/// the declared, ordered branch list the ref groups alone cannot reconstruct. Positioned
+/// naming refs carve the commit runs; another chain's naming ref ends a stack's territory,
+/// while chainless naming refs (a reachable target local, say) become segments within the
+/// reaching stack. `lower_bound` is the workspace frame's bound. `ws_meta` no longer feeds
+/// the partition — only the frame decisions the layout cannot carry (whether a workspace is
+/// anchored at all, and inactive-stack identity in `bind_stack_identity`).
 ///
 /// Returns `None` when the graph has no layout to read (unborn refs) — the caller
 /// falls back to a single named empty stack.
@@ -68,14 +71,18 @@ pub(crate) fn stacks_from_arena(
 ) -> Option<Vec<Stack>> {
     let layout = cg.layout()?;
     let (ws_commit, materialized_ws_parents) = resolve_view_anchor(cg, layout, ws_meta, entry_ref)?;
-    let in_ws_stacks: Vec<_> = ws_meta
-        .map(|meta| {
-            meta.stacks
-                .iter()
-                .filter(|stack| stack.is_in_workspace())
-                .collect()
-        })
-        .unwrap_or_default();
+    // The declared in-workspace stack partition now lives on the layout — an exact mirror of
+    // ws_meta's in-workspace stacks — so the claiming reads its CONTENT from there rather than
+    // re-consulting the metadata. Whether the partition APPLIES stays a frame decision: a
+    // frame anchored OUTSIDE the managed workspace (a plain `main` checkout) carries no
+    // workspace metadata and projects no stacks, so the layout's build-time partition — which
+    // outlives the anchor — must not leak in. `ws_meta.is_some()` is that frame signal (a
+    // presence check, not a re-read of the partition's contents).
+    let in_ws_stacks: Vec<&StackPartition> = if ws_meta.is_some() {
+        layout.stacks.iter().collect()
+    } else {
+        Vec::new()
+    };
 
     if entry_is_unapplied_branch(
         cg,
@@ -103,7 +110,7 @@ pub(crate) fn stacks_from_arena(
     let mut chain_of_name = HashMap::<&gix::refs::FullNameRef, usize>::new();
     for (li, meta_stack) in in_ws_stacks.iter().enumerate() {
         for branch in &meta_stack.branches {
-            chain_of_name.insert(branch.ref_name.as_ref(), li);
+            chain_of_name.insert(branch.as_ref(), li);
         }
     }
     let entry_ref = entry_ref.or_else(|| cg.entrypoint_ref());
@@ -168,6 +175,7 @@ pub(crate) fn stacks_from_arena(
         ));
     }
     split_at_bound_empties_from_content_stacks(&mut stacks, &walk, lower_bound, anchor);
+    surface_unprojected_chains(&mut stacks, &walk, anchor);
     prune_all_integrated_anonymous(&mut stacks);
     // A TRUE ad-hoc view always has its one stack, if only an anonymous shell —
     // a detached checkout of fully integrated territory still IS a checkout.
@@ -179,6 +187,69 @@ pub(crate) fn stacks_from_arena(
         ));
     }
     Some(stacks)
+}
+
+/// THE reconciliation pass — the single owner of "applied means projected", decided
+/// only after every run is collected: an applied chain's branches that appear NOWHERE
+/// in the projection surface as empty traces at their rest, homed into the chain's
+/// stack. No claim pass can decide this (whether another stack's walk absorbed a
+/// branch is only known once collection is done), and a branch that never surfaces
+/// would be silently unapplied by the next metadata write.
+fn surface_unprojected_chains(stacks: &mut Vec<Stack>, walk: &RunWalk<'_>, anchor: ViewAnchor) {
+    if !anchor.has_managed_ref() {
+        return;
+    }
+    let mut projected: HashSet<gix::refs::FullName> = stacks
+        .iter()
+        .flat_map(|stack| stack.segments.iter())
+        .filter_map(|segment| segment.ref_name().map(ToOwned::to_owned))
+        .collect();
+    let displayed_commits: HashSet<gix::ObjectId> = stacks
+        .iter()
+        .flat_map(|stack| stack.segments.iter())
+        .flat_map(|segment| &segment.commits)
+        .map(|commit| commit.id)
+        .collect();
+    for meta_stack in &walk.in_ws_stacks {
+        // Metadata written mid-operation can list a branch twice; the first occurrence
+        // shapes the trace, matching `claim_chain`.
+        let mut names: Vec<&gix::refs::FullName> = Vec::new();
+        for branch in &meta_stack.branches {
+            if !names.iter().any(|n| **n == *branch) {
+                names.push(branch);
+            }
+        }
+        // A branch another stack's walk absorbed is represented there; only the
+        // remainder needs a home. (A fully absorbed chain surfaces nothing.)
+        names.retain(|name| !projected.contains(*name));
+        if names.is_empty() {
+            continue;
+        }
+        let mut sip = SegmentsInProgress::new();
+        walk.emit_leftover_traces(&names, &mut sip, &displayed_commits);
+        let segments = sip.segments;
+        if segments.is_empty() {
+            continue;
+        }
+        projected.extend(
+            segments
+                .iter()
+                .filter_map(|segment| segment.ref_name().map(ToOwned::to_owned)),
+        );
+        // The chain may already have a projected stack (part walked, part traced) —
+        // the remainder settles there rather than minting a second stack with its id.
+        if let Some(stack) = stacks
+            .iter_mut()
+            .find(|stack| stack.id == Some(meta_stack.id))
+        {
+            stack.segments.extend(segments);
+        } else {
+            stacks.push(Stack::from_base_and_segments_raw(
+                segments,
+                Some(meta_stack.id),
+            ));
+        }
+    }
 }
 
 /// One run of the workspace: the metadata chain claiming it (if any), the commit
@@ -204,12 +275,12 @@ type PosByName<'a> =
 /// dependent empty resting on another stack's commit steal that stack's run.
 fn chain_claims(
     pos_by_name: &PosByName<'_>,
-    meta_stack: &but_core::ref_metadata::WorkspaceStack,
+    meta_stack: &StackPartition,
     key: gix::ObjectId,
 ) -> bool {
     let mut positions = meta_stack.branches.iter().filter_map(|b| {
         pos_by_name
-            .get(b.ref_name.as_ref())
+            .get(b.as_ref())
             .filter(|(facts, _)| facts.names_segment)
             .map(|&(facts, on)| (facts.names_empty_segment, on))
     });
@@ -244,7 +315,7 @@ fn chain_claims(
 #[expect(clippy::too_many_arguments)]
 fn build_run_order(
     cg: &CommitGraph,
-    in_ws_stacks: &[&ref_metadata::WorkspaceStack],
+    in_ws_stacks: &[&StackPartition],
     pos_by_name: &PosByName<'_>,
     ws_commit: gix::ObjectId,
     real_ws_parents: &[gix::ObjectId],
@@ -264,7 +335,16 @@ fn build_run_order(
     if anchor.managed_commit() {
         claims.claim_chains_topping_the_entry(ws_commit);
     }
-    claims.claim_real_parents(real_ws_parents);
+    // A recorded parent↔stack binding — the merge writer's intent, stamped into the
+    // workspace commit's headers — replaces the position inference for the real parents;
+    // a binding that fails validation is stale and inference takes over wholesale.
+    let bound = anchor
+        .managed_commit()
+        .then(|| cg.ws_parent_binding(ws_commit))
+        .flatten();
+    if !bound.is_some_and(|bindings| claims.claim_bound_parents(real_ws_parents, bindings)) {
+        claims.claim_real_parents(real_ws_parents);
+    }
     claims.claim_surplus_materialized_parents(materialized_ws_parents, real_ws_parents);
     // Unclaimed chains resting on the bound still surface as stacks at their
     // metadata index, with or without stored chain parents. A workspace REF makes this
@@ -275,6 +355,7 @@ fn build_run_order(
             claims.claim_duplicate_runs();
         }
         claims.claim_at_bound_empties();
+        claims.claim_legs_of_anonymous_runs();
     }
     (claims.order, claims.claimed)
 }
@@ -290,7 +371,7 @@ fn unclaimed_empties_in_table_order<'a>(
     cg: &CommitGraph,
     layout: &'a crate::ref_layout::RefLayout,
     idx: &LayoutIndexes<'_>,
-    in_ws_stacks: &[&ref_metadata::WorkspaceStack],
+    in_ws_stacks: &[&StackPartition],
     claimed: &[bool],
 ) -> HashMap<gix::ObjectId, Vec<&'a gix::refs::FullName>> {
     let mut unclaimed_empties_at = HashMap::<gix::ObjectId, Vec<&gix::refs::FullName>>::new();
@@ -300,12 +381,11 @@ fn unclaimed_empties_in_table_order<'a>(
             && name.category() == Some(gix::reference::Category::LocalBranch)
             && !is_implementation_ref(cg, name.as_ref())
     }) {
-        if in_ws_stacks.iter().enumerate().any(|(li, m)| {
-            claimed[li]
-                && m.branches
-                    .iter()
-                    .any(|b| b.ref_name.as_ref() == name.as_ref())
-        }) {
+        if in_ws_stacks
+            .iter()
+            .enumerate()
+            .any(|(li, m)| claimed[li] && m.branches.iter().any(|b| b.as_ref() == name.as_ref()))
+        {
             continue;
         }
         let Some(&(_, Some(on))) = idx.pos_by_name.get(name.as_ref()) else {
@@ -320,7 +400,7 @@ fn unclaimed_empties_in_table_order<'a>(
 /// each pass matches unclaimed metadata chains to run-start commits its own way.
 struct RunClaims<'a> {
     cg: &'a CommitGraph,
-    in_ws_stacks: &'a [&'a ref_metadata::WorkspaceStack],
+    in_ws_stacks: &'a [&'a StackPartition],
     pos_by_name: &'a PosByName<'a>,
     lower_bound: Option<gix::ObjectId>,
     // (chain, run start, owns_run): a chain claiming a REAL parent edge (or the entry
@@ -351,6 +431,69 @@ impl<'a> RunClaims<'a> {
 
     /// Every real parent edge is a run in parent order, claimed by the chain whose
     /// positioned branch sits on it (anonymous when none does).
+    /// Claim every real parent from the RECORDED binding — writer intent instead of
+    /// position inference. All-or-nothing: any slot failing validation (a tip name
+    /// that resolves to no or several declared chains, a doubly-bound chain, or a
+    /// chain whose real branch rests on a DIFFERENT parent) rejects the whole binding
+    /// as stale, and the caller falls back to [`Self::claim_real_parents`]. A `None`
+    /// slot is a DECLARED anonymous parent.
+    fn claim_bound_parents(
+        &mut self,
+        real_ws_parents: &[gix::ObjectId],
+        bindings: &[Option<gix::refs::FullName>],
+    ) -> bool {
+        if bindings.len() != real_ws_parents.len() {
+            return false;
+        }
+        let parent_set: HashSet<gix::ObjectId> = real_ws_parents.iter().copied().collect();
+        let mut per_slot = Vec::with_capacity(bindings.len());
+        let mut used = HashSet::new();
+        for (parent, binding) in real_ws_parents.iter().zip(bindings) {
+            let Some(name) = binding else {
+                per_slot.push(None);
+                continue;
+            };
+            let mut candidates = self
+                .in_ws_stacks
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.branches.first().map(|b| b.as_ref()) == Some(name.as_ref()));
+            let Some((li, _)) = candidates.next() else {
+                return false;
+            };
+            if candidates.next().is_some() {
+                return false;
+            }
+            if self.claimed[li] || !used.insert(li) {
+                return false;
+            }
+            // A chain with a real branch positioned ON some ws parent must be bound to
+            // exactly that slot — catches swapped stale bindings. Positions outside the
+            // parent set (advanced-outside shapes) trust the recorded intent.
+            let real_on_parent = self.in_ws_stacks[li].branches.iter().find_map(|b| {
+                let &(facts, on) = self.pos_by_name.get(b.as_ref())?;
+                (facts.names_segment && !facts.names_empty_segment)
+                    .then_some(on?)
+                    .filter(|pos| parent_set.contains(pos))
+            });
+            if real_on_parent.is_some_and(|pos| pos != *parent) {
+                return false;
+            }
+            per_slot.push(Some(li));
+        }
+        for (parent, slot) in real_ws_parents.iter().zip(per_slot) {
+            if let Some(li) = slot {
+                self.claimed[li] = true;
+            }
+            self.order.push(Run {
+                chain: slot,
+                start: *parent,
+                owns_run: true,
+            });
+        }
+        true
+    }
+
     fn claim_real_parents(&mut self, real_ws_parents: &[gix::ObjectId]) {
         for parent in real_ws_parents {
             let chain = self.in_ws_stacks.iter().enumerate().find_map(|(li, meta)| {
@@ -365,6 +508,44 @@ impl<'a> RunClaims<'a> {
                 owns_run: true,
             });
         }
+    }
+
+    /// Last-chance pass: a run still anonymous after every direct claim may top a
+    /// chain's leg whose tip commits lost their refs (a deleted branch leaves anonymous
+    /// commits above the chain's remaining branches). Walk each such run's first-parent
+    /// leg and claim the first still-unclaimed chain whose positioned branch sits on it,
+    /// so the chain's same-commit empties keep their home. Runs late so the direct
+    /// passes keep first pick of chains.
+    fn claim_legs_of_anonymous_runs(&mut self) {
+        for i in 0..self.order.len() {
+            if self.order[i].chain.is_some() || !self.order[i].owns_run {
+                continue;
+            }
+            let Some(li) = self.chain_on_leg_below(self.order[i].start) else {
+                continue;
+            };
+            self.claimed[li] = true;
+            self.order[i].chain = Some(li);
+        }
+    }
+
+    /// The first unclaimed chain whose positioned branch sits on a commit of the
+    /// first-parent leg strictly below `start`, stopping at (and never testing) the
+    /// lower bound — bound content belongs to the at-bound machinery.
+    fn chain_on_leg_below(&self, start: gix::ObjectId) -> Option<usize> {
+        let mut cursor = start;
+        for _ in 0..10_000 {
+            cursor = self.cg.all_parent_ids(cursor).first().copied()?;
+            if Some(cursor) == self.lower_bound {
+                return None;
+            }
+            if let Some(li) = self.in_ws_stacks.iter().enumerate().find_map(|(li, meta)| {
+                (!self.claimed[li] && chain_claims(self.pos_by_name, meta, cursor)).then_some(li)
+            }) {
+                return Some(li);
+            }
+        }
+        None
     }
 
     /// The chain parents ARE the resolved set of runs: every real parent plus a fresh
@@ -405,7 +586,7 @@ impl<'a> RunClaims<'a> {
         for (li, meta) in self.in_ws_stacks.iter().enumerate() {
             if self.claimed[li] {
                 self.claimed_names
-                    .extend(meta.branches.iter().map(|b| b.ref_name.as_ref()));
+                    .extend(meta.branches.iter().map(|b| b.as_ref()));
             }
         }
     }
@@ -421,7 +602,7 @@ impl<'a> RunClaims<'a> {
                 || meta
                     .branches
                     .iter()
-                    .all(|b| self.claimed_names.contains(b.ref_name.as_ref()))
+                    .all(|b| self.claimed_names.contains(b.as_ref()))
             {
                 continue;
             }
@@ -435,7 +616,7 @@ impl<'a> RunClaims<'a> {
                         .iter()
                         .find_map(|b| {
                             self.pos_by_name
-                                .get(b.ref_name.as_ref())
+                                .get(b.as_ref())
                                 .filter(|(facts, _)| {
                                     facts.names_segment
                                         && !facts.names_empty_segment
@@ -449,7 +630,7 @@ impl<'a> RunClaims<'a> {
                 });
             let Some(key) = key else { continue };
             self.claimed_names
-                .extend(meta.branches.iter().map(|b| b.ref_name.as_ref()));
+                .extend(meta.branches.iter().map(|b| b.as_ref()));
             self.insert_claim(
                 li,
                 Run {
@@ -474,7 +655,7 @@ impl<'a> RunClaims<'a> {
             if meta
                 .branches
                 .iter()
-                .all(|b| self.claimed_names.contains(b.ref_name.as_ref()))
+                .all(|b| self.claimed_names.contains(b.as_ref()))
             {
                 continue;
             }
@@ -487,12 +668,12 @@ impl<'a> RunClaims<'a> {
                     || (on.is_some() && on == self.lower_bound)
             };
             let all_empty_anchor = meta.branches.iter().find_map(|b| {
-                let &(facts, on) = self.pos_by_name.get(b.ref_name.as_ref())?;
+                let &(facts, on) = self.pos_by_name.get(b.as_ref())?;
                 is_empty_pos(facts, on).then_some(on).flatten()
             });
             let any_real = meta.branches.iter().any(|b| {
                 self.pos_by_name
-                    .get(b.ref_name.as_ref())
+                    .get(b.as_ref())
                     .is_some_and(|&(facts, on)| facts.names_segment && !is_empty_pos(facts, on))
             });
             let Some(anchor) = all_empty_anchor
@@ -502,7 +683,7 @@ impl<'a> RunClaims<'a> {
                 continue;
             };
             self.claimed_names
-                .extend(meta.branches.iter().map(|b| b.ref_name.as_ref()));
+                .extend(meta.branches.iter().map(|b| b.as_ref()));
             self.insert_claim(
                 li,
                 Run {
@@ -549,12 +730,8 @@ fn split_at_bound_empties_from_content_stacks(
         else {
             continue;
         };
-        let rank_of = |name: &gix::refs::FullNameRef| {
-            chain
-                .branches
-                .iter()
-                .position(|b| b.ref_name.as_ref() == name)
-        };
+        let rank_of =
+            |name: &gix::refs::FullNameRef| chain.branches.iter().position(|b| b.as_ref() == name);
         // The highest-ranked (closest to top) content-bearing member.
         let Some(top_content_rank) = stack
             .segments
@@ -602,7 +779,7 @@ struct RunWalk<'a> {
     layout: &'a crate::ref_layout::RefLayout,
     idx: LayoutIndexes<'a>,
     chain_of_name: HashMap<&'a gix::refs::FullNameRef, usize>,
-    in_ws_stacks: Vec<&'a ref_metadata::WorkspaceStack>,
+    in_ws_stacks: Vec<&'a StackPartition>,
     owned_run_starts: HashSet<gix::ObjectId>,
     bound_run_exists: bool,
     anchor: ViewAnchor,
@@ -718,14 +895,9 @@ impl<'a> RunWalk<'a> {
                 || !seg.ref_name().is_some_and(in_gitbutler_namespace)
         });
         if segments.is_empty() {
-            if li.is_some() {
-                self.emit_collapsed_chain_last_trace(&branch_names, &mut segments);
-            }
-            if segments.is_empty() {
-                // Fully empty stacks are removed — a parent whose run was consumed
-                // elsewhere contributes nothing.
-                return None;
-            }
+            // Fully empty stacks are removed — a parent whose run was consumed
+            // elsewhere contributes nothing.
+            return None;
         }
         Some(Stack::from_base_and_segments_raw(segments, id))
     }
@@ -749,8 +921,8 @@ impl<'a> RunWalk<'a> {
         claimed[li] = true;
         let mut names: Vec<&gix::refs::FullName> = Vec::new();
         for b in &meta_stack.branches {
-            if !names.iter().any(|n| **n == b.ref_name) {
-                names.push(&b.ref_name);
+            if !names.iter().any(|n| **n == *b) {
+                names.push(b);
             }
         }
         bound_ids.insert(meta_stack.id);
@@ -1072,7 +1244,13 @@ impl<'a> RunWalk<'a> {
                     && self
                         .chain_of_name
                         .get(name.as_ref())
-                        .is_some_and(|&c| Some(c) != li && claimed[c]) =>
+                        .is_some_and(|&c| Some(c) != li && claimed[c])
+                    // Only where that other stack actually collects — its own run's
+                    // start. A foreign name MID-LEG (metadata written mid-move lists
+                    // the branch in a chain that walks elsewhere) must not end the
+                    // walk: nothing else collects these commits, so stopping would
+                    // vanish them and everything below.
+                    && self.owned_run_starts.contains(&id) =>
             {
                 SegmentCut::ForeignTerritory
             }
@@ -1094,6 +1272,7 @@ impl<'a> RunWalk<'a> {
     ) {
         for n in pending.into_iter().chain(bound_rest) {
             if !sip.emitted.contains(n.as_ref()) {
+                sip.emitted.insert(n.as_ref());
                 // Empty leftovers own no commit — None, not their anchor.
                 sip.segments.push(named_segment(n.clone(), None, self.ctx));
             }
@@ -1139,31 +1318,45 @@ impl<'a> RunWalk<'a> {
             })
     }
 
-    /// PHASE 6: a CHAIN-claimed run that collapsed to nothing (its walk broke at
-    /// the bound immediately, e.g. a branch merged upstream whose commit IS the
-    /// bound) still emits its empty/at-bound branches: this run is the chain's
-    /// only projection, and a vanished applied chain would be un-applied by the
-    /// next write.
-    fn emit_collapsed_chain_last_trace(
+    /// THE RECONCILIATION RULE: an applied branch projected nowhere traces as an empty
+    /// segment at its rest — naming rights don't matter, the branch vanishes otherwise
+    /// and the next metadata write would silently unapply it — but only when the rest
+    /// is INCORPORATED territory: integrated history, workspace territory no stack
+    /// displays (a rest on a displayed commit rides or splices there instead), or no
+    /// resting commit at all. Rests on unincorporated OUTSIDE commits stay out: they
+    /// are not-yet-merged content whose adoption is materialize's reconciliation work
+    /// (mid-operation projections feed the merges apply builds), never display fiat.
+    /// The workspace's own refs never rest as empties.
+    fn emit_leftover_traces(
         &self,
-        branch_names: &[&gix::refs::FullName],
-        segments: &mut Vec<StackSegment>,
+        branch_names: &[&'a gix::refs::FullName],
+        sip: &mut SegmentsInProgress<'a>,
+        displayed_commits: &HashSet<gix::ObjectId>,
     ) {
-        for n in branch_names {
-            let pos = self.idx.pos_by_name.get(n.as_ref());
-            // Naming rights don't matter here — the chain vanishes otherwise,
-            // so any empty or at-bound position is trace enough.
-            let at_bound_or_empty = pos.is_some_and(|&(facts, on)| {
-                facts.names_empty_segment || (on.is_some() && on == self.lower_bound)
-            });
-            if at_bound_or_empty {
-                let mut seg = named_segment((*n).clone(), None, self.ctx);
-                // The anchor is this empty branch's base — operations
-                // rebuilding the workspace commit fall back to it when
-                // there is no tip.
-                seg.base = pos.and_then(|&(_, on)| on);
-                segments.push(seg);
+        for &n in branch_names {
+            if sip.emitted.contains(n.as_ref()) || in_gitbutler_namespace(n.as_ref()) {
+                continue;
             }
+            let Some(&(_, on)) = self.idx.pos_by_name.get(n.as_ref()) else {
+                continue;
+            };
+            let incorporated = match on {
+                None => true,
+                Some(on) => self.cg.node(on).is_none_or(|n| {
+                    n.flags.contains(crate::CommitFlags::Integrated)
+                        || (n.flags.contains(crate::CommitFlags::InWorkspace)
+                            && !displayed_commits.contains(&on))
+                }),
+            };
+            if !incorporated {
+                continue;
+            }
+            sip.emitted.insert(n.as_ref());
+            let mut seg = named_segment(n.clone(), None, self.ctx);
+            // The rest is this empty branch's base — operations rebuilding the
+            // workspace commit fall back to it when there is no tip.
+            seg.base = on;
+            sip.segments.push(seg);
         }
     }
 }
@@ -1200,7 +1393,7 @@ fn prune_all_integrated_anonymous(stacks: &mut Vec<Stack>) {
 /// a managed workspace commit defines the workspace view (a branch checkout
 /// inside a workspace); otherwise the entrypoint commit is the single run and
 /// the ad-hoc discriminator does the rest.
-fn resolve_view_anchor(
+pub(super) fn resolve_view_anchor(
     cg: &CommitGraph,
     layout: &crate::ref_layout::RefLayout,
     ws_meta: Option<&ref_metadata::Workspace>,
@@ -1238,7 +1431,7 @@ fn entry_is_unapplied_branch(
     cg: &CommitGraph,
     ws_commit: gix::ObjectId,
     ws_meta: Option<&ref_metadata::Workspace>,
-    in_ws_stacks: &[&ref_metadata::WorkspaceStack],
+    in_ws_stacks: &[&StackPartition],
     has_managed_ref: bool,
     entry_ref: Option<&gix::refs::FullName>,
 ) -> bool {
@@ -1262,19 +1455,19 @@ fn entry_is_unapplied_branch(
 
 /// The layout read three ways: positioned refs by name, run-naming refs by commit,
 /// empty-segment names, and out-of-workspace name projections.
-struct LayoutIndexes<'a> {
+pub(super) struct LayoutIndexes<'a> {
     pos_by_name: PosByName<'a>,
-    naming_at: HashMap<gix::ObjectId, &'a gix::refs::FullName>,
-    names_empty: HashSet<&'a gix::refs::FullNameRef>,
+    pub(super) naming_at: HashMap<gix::ObjectId, &'a gix::refs::FullName>,
+    pub(super) names_empty: HashSet<&'a gix::refs::FullNameRef>,
     /// A naming ref positioned OUTSIDE the workspace projects onto its first
     /// in-workspace first-parent ancestor: the segment there takes its name, and the
     /// outside prefix rides along as commits_outside.
-    projected_at: HashMap<gix::ObjectId, (&'a gix::refs::FullName, Vec<StackCommit>)>,
+    pub(super) projected_at: HashMap<gix::ObjectId, (&'a gix::refs::FullName, Vec<StackCommit>)>,
 }
 
 /// The `refs/heads/gitbutler/` namespace: refs GitButler creates for itself (the
 /// workspace ref, targets) rather than the user's branches.
-fn in_gitbutler_namespace(name: &gix::refs::FullNameRef) -> bool {
+pub(crate) fn in_gitbutler_namespace(name: &gix::refs::FullNameRef) -> bool {
     name.as_bstr().starts_with(b"refs/heads/gitbutler/")
 }
 
@@ -1284,7 +1477,7 @@ fn is_implementation_ref(cg: &CommitGraph, name: &gix::refs::FullNameRef) -> boo
     in_gitbutler_namespace(name) && cg.entrypoint_ref().map(|r| r.as_ref()) != Some(name)
 }
 
-fn index_layout<'a>(
+pub(super) fn index_layout<'a>(
     cg: &CommitGraph,
     layout: &'a crate::ref_layout::RefLayout,
     anchor: ViewAnchor,
@@ -1455,7 +1648,7 @@ fn next_parent(
 
 /// Refs consumed as structure stay off the commit: the segment's own naming ref,
 /// refs naming empty segments, remote-category refs, and gitbutler/* refs.
-fn strip_structural_refs(
+pub(super) fn strip_structural_refs(
     commit: &mut StackCommit,
     own_name: Option<&gix::refs::FullNameRef>,
     names_empty: &HashSet<&gix::refs::FullNameRef>,

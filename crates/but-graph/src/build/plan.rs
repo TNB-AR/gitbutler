@@ -273,7 +273,6 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
     let lists_per_commit = stack_lists_per_commit(cg, &combined);
     let at_or_below_bound: Option<IdSet> = ws_lower_bound.map(|lb| cg.ancestor_set(lb));
     anonymize_shared_bases(
-        cg,
         facts,
         lists,
         &lists_per_commit,
@@ -551,7 +550,6 @@ fn stack_lists_per_commit(cg: &CommitGraph, lists: &[Vec<gix::refs::FullName>]) 
 /// as its own empty chain.
 #[allow(clippy::too_many_arguments)]
 fn anonymize_shared_bases(
-    cg: &CommitGraph,
     facts: &Facts,
     lists: &[Vec<gix::refs::FullName>],
     lists_per_commit: &IdMap<usize>,
@@ -580,42 +578,13 @@ fn anonymize_shared_bases(
     }
     if let Some(lb) = ws_lower_bound
         && facts.boundaries.contains(&lb)
-        && name_of.get(&lb).is_some_and(|n| {
-            lists
-                .iter()
-                .any(|l| l.contains(n) && floats_at_lower_bound(cg, ws_lower_bound, l))
-        })
+        && name_of
+            .get(&lb)
+            .is_some_and(|n| lists.iter().any(|l| l.contains(n)))
     {
         name_of.remove(&lb);
         anonymous_bases.insert(lb);
     }
-}
-
-/// Does this metadata stack list rest at the workspace lower bound — some branch at the bound
-/// itself and every other resolved branch integrated?
-fn floats_at_lower_bound(
-    cg: &CommitGraph,
-    ws_lower_bound: Option<gix::ObjectId>,
-    list: &[gix::refs::FullName],
-) -> bool {
-    let Some(lb) = ws_lower_bound else {
-        return false;
-    };
-    let mut at_lb = false;
-    for b in list {
-        match cg.commit_by_ref(b.as_ref()) {
-            Some(c) if c == lb => at_lb = true,
-            Some(c)
-                if cg
-                    .node(c)
-                    .is_some_and(|n| !n.flags.contains(crate::CommitFlags::Integrated)) =>
-            {
-                return false;
-            }
-            _ => {}
-        }
-    }
-    at_lb
 }
 
 /// The full set of names in use by `insert_empty_branches` time — chain names plus everything
@@ -753,8 +722,10 @@ fn thread_ref_groups(
             if !name_of.contains_key(&anchor)
                 && (lists_per_commit.get(&commit).copied().unwrap_or(0) <= 1
                     || shared_commit_above_bound)
-                && !(Some(commit) == ws_lower_bound
-                    && floats_at_lower_bound(cg, ws_lower_bound, &list))
+                // A chain member never names the lower bound — the bound's segment lies
+                // below the workspace, so a name spent there vanishes from the stacks.
+                // At-bound members float as empty segments instead.
+                && Some(commit) != ws_lower_bound
                 && let Some(namer) = group.last()
                 && !used.contains(namer)
             {

@@ -227,7 +227,11 @@ fn workspace_from_workspace_ref(ctx: &Context) -> Result<but_graph::Workspace> {
 
 fn ensure_stack_in_workspace(ctx: &Context, stack_id: StackId) -> Result<()> {
     #[allow(deprecated)]
-    workspace_from_workspace_ref(ctx)?.try_find_stack_by_id(stack_id)?;
+    workspace_from_workspace_ref(ctx)?
+        .segment_graph
+        .stack_by_id(stack_id)
+        .map(|_| ())
+        .with_context(|| format!("Couldn't find stack with id {stack_id:?} in workspace"))?;
     Ok(())
 }
 
@@ -312,7 +316,7 @@ pub(crate) fn save_and_return_to_workspace(ctx: &Context, perm: &mut RepoExclusi
         .stored_target_commit_id()
         .context("failed to get target base oid")?;
     let old_head_oids = old_workspace_projection
-        .stacks
+        .display_stacks()?
         .iter()
         .map(|stack| stack.tip_skip_empty().unwrap_or(old_target_base_oid))
         .collect::<Vec<_>>();

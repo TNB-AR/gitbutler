@@ -105,15 +105,6 @@ pub struct StackEntryNoOpt {
 #[cfg(feature = "export-schema")]
 but_schemars::register_sdk_type!(StackEntryNoOpt);
 
-impl From<StackEntryNoOpt> for crate::commit::Stack {
-    fn from(value: StackEntryNoOpt) -> Self {
-        crate::commit::Stack {
-            tip: value.tip,
-            name: value.name().map(ToOwned::to_owned),
-        }
-    }
-}
-
 impl StackEntry {
     /// The name of the stack, which is the name of the top-most branch.
     pub fn name(&self) -> Option<&BStr> {

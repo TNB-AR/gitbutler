@@ -883,6 +883,18 @@ RefInfo {
                     commits_outside: None,
                     metadata: Branch,
                     push_status: NothingToPush,
+                    base: "None",
+                },
+                ref_info::ui::Segment {
+                    ref_name: "►A",
+                    remote_tracking_ref_name: "refs/remotes/origin/A",
+                    commits: [],
+                    commits_on_remote: [
+                        Commit(059cc4f, "Merge branch \'B-on-A\' into new-origin-A\n"),
+                    ],
+                    commits_outside: None,
+                    metadata: Branch,
+                    push_status: UnpushedCommitsRequiringForce,
                     base: "0ee3a9e",
                 },
             ],

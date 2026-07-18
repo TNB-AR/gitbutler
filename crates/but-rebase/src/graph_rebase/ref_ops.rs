@@ -484,9 +484,12 @@ pub(crate) struct GroupSplit {
     /// The members left behind, with their pre-split `(on, below)` — settle them with
     /// [`settle_group_lower`] once the edge entering the lower part is known.
     pub lower: Vec<(RefIndex, PickIndex, Option<RefIndex>)>,
-    /// Whether any member moved onto the upper entry. When none did, `at_ref` was the top
-    /// of its group, so the group's carried edges belong to the caller's new pick.
-    pub moved_any: bool,
+    /// The moved member that landed at the BOTTOM of the upper side (below cleared). The
+    /// caller re-hangs it on the upper pick's chain top AFTER its edge surgery settles —
+    /// only then do carries resolve against final edges.
+    pub boundary: Option<RefIndex>,
+    /// Every member that moved onto the upper entry (the boundary and its riders).
+    pub moved: Vec<RefIndex>,
 }
 
 /// Split the group at `at_ref` around a pick interposed into it: members on the upper side of
@@ -501,7 +504,8 @@ pub(crate) fn split_group(
     if !graph.is_positioned(at_ref) {
         return GroupSplit {
             lower: Vec::new(),
-            moved_any: false,
+            boundary: None,
+            moved: Vec::new(),
         };
     }
     let members: Vec<_> = positions::group_members(graph, at_ref)
@@ -531,6 +535,7 @@ pub(crate) fn split_group(
     }
     let mut lower = Vec::new();
     let mut boundary_below = None;
+    let mut boundary = None;
     for (entry, on, below) in members {
         if moved.contains(&entry) {
             graph.rekey_position(entry, upper);
@@ -538,6 +543,7 @@ pub(crate) fn split_group(
                 // The boundary member lands at the bottom; its old below stays on the
                 // lower side.
                 boundary_below = below;
+                boundary = Some(entry);
                 graph.set_below(entry, None);
             }
         } else {
@@ -557,7 +563,8 @@ pub(crate) fn split_group(
     }
     GroupSplit {
         lower,
-        moved_any: !moved.is_empty(),
+        boundary,
+        moved,
     }
 }
 

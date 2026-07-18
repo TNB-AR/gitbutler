@@ -894,9 +894,10 @@ fn uncommit_changes_from_commits_handles_parallel_stacks() -> Result<()> {
 +++ after
 +*-.   [C5] (HEAD -> gitbutler/workspace) GitButler Workspace Commit
 +|\ \
-+| * | [C6] (stack-b) stack B adds file
++| | * [C6] (stack-b) stack B adds file
 +| |/
-+* / [C7] (stack-a) stack A adds file
++|/|
++| * [C7] (stack-a) stack A adds file
 +|/
 +* [C4] (main) base
 

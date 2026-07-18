@@ -2,9 +2,10 @@
 
 use anyhow::{Context, Result, bail};
 use but_core::RefMetadata;
-use but_graph::workspace::{Stack, StackSegment};
+use but_graph::workspace::{Segment, SegmentStack};
 use but_rebase::graph_rebase::{
     Editor, LookupStep, Selector, Step, ToSelector,
+    mutate::Reconnect,
     selector::{SelectorSet, SomeSelectors, StepRange},
 };
 use std::collections::HashSet;
@@ -25,17 +26,15 @@ pub struct DisconnectParameters {
 /// as well as the right segment range to move.
 pub fn get_disconnect_parameters<'meta, M: RefMetadata>(
     editor: &Editor<'meta, M>,
-    source_stack: &Stack,
-    subject_segment: &StackSegment,
+    source_stack: &SegmentStack,
+    subject_segment: &Segment,
     workspace_head: Option<gix::ObjectId>,
 ) -> anyhow::Result<DisconnectParameters> {
     let index_of_segment = source_stack
         .segments
         .iter()
         .position(|segment| {
-            segment.ref_name() == subject_segment.ref_name()
-                && segment.commits.first().map(|c| c.id)
-                    == subject_segment.commits.first().map(|c| c.id)
+            segment.ref_name == subject_segment.ref_name && segment.tip() == subject_segment.tip()
         })
         .context("BUG: Unable to find subject segment on source stack.")?;
 
@@ -46,8 +45,8 @@ pub fn get_disconnect_parameters<'meta, M: RefMetadata>(
         .select_reference(subject_segment_ref_name)
         .context("Failed to find subject reference in graph.")?;
     let delimiter_parent = match subject_segment.commits.last() {
-        Some(last_commit) => editor
-            .select_commit(last_commit.id)
+        Some(bottom) => editor
+            .select_commit(*bottom)
             .context("Failed to find last commit in subject segment in graph.")?,
         None => {
             // Subject segment is empty, move only the reference
@@ -111,8 +110,8 @@ pub fn get_disconnect_parameters<'meta, M: RefMetadata>(
     // the reference from it.
     // Otherwise, disconnect the last commit on the segment.
     let child_selector = match child_segment.commits.last() {
-        Some(last_commit) => editor
-            .select_commit(last_commit.id)
+        Some(bottom) => editor
+            .select_commit(*bottom)
             .context("Failed to find last commit of child segment in graph."),
         None => {
             // The segment on top of the subject segment is empty. Select the reference.
@@ -195,7 +194,7 @@ pub(crate) fn disconnect_selector_from_all_parents<M: RefMetadata>(
         },
         SelectorSet::None,
         SelectorSet::All,
-        true,
+        Reconnect::Skip,
     )?;
 
     Ok(())

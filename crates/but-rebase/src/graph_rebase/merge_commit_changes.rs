@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 use but_core::{RefMetadata, commit::tree_expression::TreeExpression};
 use gix::prelude::ObjectIdExt;
 
+use crate::commit::DateMode;
 use crate::graph_rebase::{Editor, PickIndex, util::collect_ordered_parents};
 
 /// A selected commit change range that should be merged into an accumulated
@@ -101,6 +102,36 @@ impl<M: RefMetadata> Editor<'_, M> {
                 }
             }
         })
+    }
+
+    /// Synthesize the squashed commit a merge outcome describes: `template`'s
+    /// identity with `parents`, the outcome's tree, and `message` — the one way a
+    /// [`MergeCommitChangesOutcome`] becomes a commit. A conflicted outcome encodes
+    /// as a conflicted commit (the auto-resolved tree stays the visible tree, the
+    /// message gains conflict markers); a caller that refuses conflicts checks
+    /// [`MergeCommitChangesOutcome::conflict`] before calling. Committer dates
+    /// update, authorship stays.
+    pub fn new_squashed_commit(
+        &self,
+        mut template: but_core::CommitOwned,
+        parents: Vec<gix::ObjectId>,
+        outcome: MergeCommitChangesOutcome,
+        message: Vec<u8>,
+    ) -> Result<gix::ObjectId> {
+        template.inner.parents = parents.into();
+        if let Some(conflict) = outcome.conflict {
+            template.tree = but_core::commit::write_conflicted_tree(
+                self.repo(),
+                outcome.tree_id,
+                &conflict.tree_expression,
+                &conflict.conflict_entries,
+            )?;
+            template.message = but_core::commit::add_conflict_markers(bstr::BStr::new(&message));
+        } else {
+            template.tree = outcome.tree_id;
+            template.message = message.into();
+        }
+        self.new_commit(template, DateMode::CommitterUpdateAuthorKeep)
     }
 
     /// Turn the selected commits into mergeable `base..commit` change ranges

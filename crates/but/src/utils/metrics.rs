@@ -547,7 +547,8 @@ pub fn add_workspace_shape(event: &mut Event, current_dir: &Path) {
         return;
     }
     let branches_per_lane: Vec<usize> = ws
-        .stacks
+        .display_stacks()
+        .unwrap_or_default()
         .iter()
         .map(|stack| {
             stack

@@ -112,14 +112,14 @@ fn emit_workspace(
         writeln!(
             err,
             "Workspace with {} stacks and {} segments across all stacks with {} commits total",
-            workspace.stacks.len(),
+            workspace.display_stacks()?.len(),
             workspace
-                .stacks
+                .display_stacks()?
                 .iter()
                 .map(|stack| stack.segments.len())
                 .sum::<usize>(),
             workspace
-                .stacks
+                .display_stacks()?
                 .iter()
                 .flat_map(|stack| stack.segments.iter().map(|segment| segment.commits.len()))
                 .sum::<usize>(),

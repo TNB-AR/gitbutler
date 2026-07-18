@@ -1201,6 +1201,7 @@ fn setup_single_stack_metadata(env: &Sandbox, branch_names: &[&str]) -> anyhow::
                 Ok(WorkspaceStackBranch {
                     ref_name: format!("refs/heads/{branch_name}").try_into()?,
                     archived: false,
+                    parents: None,
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?,

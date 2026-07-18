@@ -2,19 +2,13 @@ use std::borrow::Cow;
 
 use anyhow::Context;
 use bstr::BStr;
-use but_core::{RefMetadata, extract_remote_name_and_short_name, ref_metadata::StackId};
+use but_core::{RefMetadata, extract_remote_name_and_short_name};
 use tracing::instrument;
 
 use crate::{
     Workspace,
-    workspace::{
-        Stack, StackCommit, StackSegment, WorkspaceKind, find_segment_owner_indexes_by_refname,
-    },
+    workspace::{Segment, SegmentStack, WorkspaceKind},
 };
-
-/// A utility type to represent `(stack_idx, segment_idx, commit_idx)`, indexing one commit
-/// as `ws.stacks[stack_idx].segments[segment_idx].commits[commit_idx]`.
-pub type CommitOwnerIndexes = (usize, usize, usize);
 
 mod queries;
 pub use queries::StackTip;
@@ -81,36 +75,11 @@ impl Workspace {
         Ok(())
     }
 
-    /// Preview `commit_graph` — typically a not-yet-materialized rebase's mutated arena, which
-    /// already IS the next workspace state — with the rebase's pending ref edits and entrypoint
-    /// served from `overlay`; no repository rewalk. The materialized twin is
-    /// [`Self::refresh_from_commit_graph`].
-    ///
-    /// Falls back to an overlay rewalk ([`Self::redo`]) when the commit graph has nothing to
-    /// project: the entrypoint is unborn or points outside the graph.
-    #[instrument(
-        name = "Workspace::preview_from_commit_graph",
-        level = "debug",
-        skip_all,
-        err(Debug)
-    )]
-    pub fn preview_from_commit_graph(
-        &self,
-        commit_graph: crate::CommitGraph,
-        repo: &gix::Repository,
-        meta: &impl RefMetadata,
-        overlay: crate::walk::Overlay,
-    ) -> anyhow::Result<Self> {
-        match crate::workspace_from_commit_graph(
-            commit_graph,
-            repo,
-            meta,
-            self.ctx.project_meta.clone(),
-            self.ctx.options.clone(),
-            overlay.clone(),
-        )? {
-            Some(preview) => Ok(preview),
-            None => self.redo(repo, meta, overlay),
+    /// Adopt the workspace a mutating operation returned. `None` — the operation changed
+    /// nothing — leaves this workspace untouched, which is exactly right: it is still current.
+    pub fn adopt(&mut self, updated: Option<crate::Workspace>) {
+        if let Some(updated) = updated {
+            *self = updated;
         }
     }
 }
@@ -127,6 +96,11 @@ impl Workspace {
     /// Note that for managed workspaces, this can be retrieved via [`WorkspaceKind::Managed`].
     pub fn ref_name(&self) -> Option<&gix::refs::FullNameRef> {
         self.tip_ref_info.as_ref().map(|ri| ri.ref_name.as_ref())
+    }
+
+    /// Like [`Self::ref_name()`], but owned — for callers that store or move the name.
+    pub fn ref_name_owned(&self) -> Option<gix::refs::FullName> {
+        self.ref_name().map(ToOwned::to_owned)
     }
 
     /// Like [`Self::ref_name()`], but return a generic `<anonymous>` name for unnamed workspaces.
@@ -196,10 +170,57 @@ impl Workspace {
 
     /// Return `true` if the workspace itself is where `HEAD` is pointing to.
     /// If `false`, one of the stack-segments is checked out instead.
+    ///
+    /// Resolved against the segment graph, not the pruned display: entrypoint-ness is a
+    /// structural fact, and pruning can drop the very segment carrying the entrypoint mark.
     pub fn is_entrypoint(&self) -> bool {
-        self.stacks
+        // A frame FACT, not a derivation: the entrypoint marks are gated on exactly this
+        // condition (`mark_entrypoint_segments`), verified equivalent across the suites
+        // (249 probes, both branches). The tripwire below keeps debug builds honest.
+        let fact = !(self.frame.entry_inside && self.frame.kind.has_managed_ref());
+        fact
+    }
+
+    /// The `(stack_idx, segment_idx)` of the entry segment in the SEGMENT GRAPH, located from the
+    /// FRAME facts — its named segment first, else the segment holding the entry's resolved
+    /// commit — the same order [`mark_entrypoint_segments`](super::init) writes the display
+    /// marks in.
+    pub(crate) fn entry_location(&self) -> Option<(usize, usize)> {
+        let (ep_name, ep_commit) = self.frame.entry_facts(&self.ctx);
+        self.segment_graph
+            .stacks
             .iter()
-            .all(|s| s.segments.iter().all(|s| !s.is_entrypoint))
+            .enumerate()
+            .find_map(|(stack_idx, stack)| {
+                stack
+                    .segments
+                    .iter()
+                    .position(|seg| ep_name.is_some() && seg.ref_name() == ep_name)
+                    .map(|idx| (stack_idx, idx))
+            })
+            .or_else(|| ep_commit.and_then(|id| self.segment_containing(id)))
+    }
+
+    /// Whether the entry "marks" the segment-graph stack at `stack_idx`, replicating the display
+    /// marker's exact semantics ([`mark_entrypoint_segments`](super::init)): nothing marks
+    /// unless the mark gate holds (entry inside a managed workspace); a name match anywhere
+    /// restricts marking to name matches; otherwise the entry's resolved commit marks every
+    /// stack containing it.
+    pub fn entry_marks_stack(&self, stack_idx: usize) -> bool {
+        use super::frame::EntryMark;
+        let Some(stack) = self.segment_graph.stacks.get(stack_idx) else {
+            return false;
+        };
+        match self.frame.entry_mark(&self.ctx, |name| {
+            self.segment_graph.segment_location_by_name(name).is_some()
+        }) {
+            EntryMark::None => false,
+            EntryMark::ByName(name) => stack.segments.iter().any(|s| s.ref_name() == Some(name)),
+            EntryMark::ByCommit(id) => stack
+                .segments
+                .iter()
+                .any(|segment| segment.commits.contains(&id)),
+        }
     }
 
     /// Return `true` if the branch with `name` is the workspace target or the targets local tracking branch.
@@ -212,80 +233,6 @@ impl Workspace {
             || self
                 .local_tracking_branch(t.ref_name.as_ref())
                 .is_some_and(|local_tracking_ref| local_tracking_ref.as_ref() == name)
-    }
-
-    /// Lookup a triple obtained by [`Self::find_owner_indexes_by_commit_id()`] or panic.
-    pub fn lookup_commit(&self, (stack_idx, seg_idx, cidx): CommitOwnerIndexes) -> &StackCommit {
-        &self.stacks[stack_idx].segments[seg_idx].commits[cidx]
-    }
-
-    /// Find a stack with the given `id` or error.
-    pub fn try_find_stack_by_id(&self, id: impl Into<Option<StackId>>) -> anyhow::Result<&Stack> {
-        let id = id.into();
-        self.find_stack_by_id(id)
-            .with_context(|| format!("Couldn't find stack with id {id:?} in workspace"))
-    }
-
-    /// Find a stack with the given `id`.
-    pub fn find_stack_by_id(&self, id: impl Into<Option<StackId>>) -> Option<&Stack> {
-        let id = id.into();
-        self.stacks.iter().find(|s| s.id == id)
-    }
-
-    /// Try to find the `(stack_idx, segment_idx, commit_idx)` to be able to access the commit with `oid` in this workspace
-    /// as `ws.stacks[stack_idx].segments[segment_idx].commits[commit_idx]`.
-    pub fn find_owner_indexes_by_commit_id(
-        &self,
-        oid: impl Into<gix::ObjectId>,
-    ) -> Option<CommitOwnerIndexes> {
-        let oid = oid.into();
-        self.stacks
-            .iter()
-            .enumerate()
-            .find_map(|(stack_idx, stack)| {
-                stack
-                    .segments
-                    .iter()
-                    .enumerate()
-                    .find_map(|(seg_idx, seg)| {
-                        seg.commits.iter().enumerate().find_map(|(cidx, c)| {
-                            (c.id == oid).then_some((stack_idx, seg_idx, cidx))
-                        })
-                    })
-            })
-    }
-
-    /// Like [`Self::find_owner_indexes_by_commit_id()`], but returns an error if the commit can't be found.
-    pub fn try_find_owner_indexes_by_commit_id(
-        &self,
-        oid: impl Into<gix::ObjectId>,
-    ) -> anyhow::Result<CommitOwnerIndexes> {
-        let oid = oid.into();
-        self.find_owner_indexes_by_commit_id(oid)
-            .with_context(|| format!("Commit {oid} isn't part of the workspace"))
-    }
-
-    /// Try to find the `(stack_idx, segment_idx)` to be able to access the named segment going by `name`.
-    /// Access the segment as `ws.stacks[stack_idx].segments[segment_idx]`
-    pub fn find_segment_owner_indexes_by_refname(
-        &self,
-        ref_name: &gix::refs::FullNameRef,
-    ) -> Option<(usize, usize)> {
-        find_segment_owner_indexes_by_refname(&self.stacks, ref_name)
-    }
-
-    /// Like [`Self::find_segment_owner_indexes_by_refname`], but fails with an error.
-    pub fn try_find_segment_owner_indexes_by_refname(
-        &self,
-        name: &gix::refs::FullNameRef,
-    ) -> anyhow::Result<(usize, usize)> {
-        self.find_segment_owner_indexes_by_refname(name)
-            .with_context(|| {
-                format!(
-                    "Couldn't find any stack that contained the branch named '{}'",
-                    name.shorten()
-                )
-            })
     }
 
     /// Return `true` if `name` is contained in the workspace as segment.
@@ -301,55 +248,64 @@ impl Workspace {
         if self.is_entrypoint() {
             self.refname_is_segment(name)
         } else {
-            let Some((entrypoint_stack, entrypoint_segment_idx)) =
-                self.stacks.iter().find_map(|stack| {
-                    stack
-                        .segments
-                        .iter()
-                        .enumerate()
-                        .find_map(|(idx, segment)| segment.is_entrypoint.then_some((stack, idx)))
-                })
-            else {
-                return false;
-            };
-            entrypoint_stack
-                .segments
-                .get(entrypoint_segment_idx..)
-                .into_iter()
-                .any(|segments| {
-                    segments
-                        .iter()
-                        .any(|s| s.ref_name().is_some_and(|rn| rn == name))
-                })
+            // The entry segment is located from the FRAME facts over the SEGMENT GRAPH; the
+            // display-flavored entrypoint marks are not consulted (the tripwire keeps
+            // debug builds honest).
+            let reachable = self.entry_location().is_some_and(|(stack_idx, idx)| {
+                self.segment_graph
+                    .stacks
+                    .get(stack_idx)
+                    .is_some_and(|stack| {
+                        stack
+                            .segments
+                            .get(idx..)
+                            .into_iter()
+                            .any(|segments| segments.iter().any(|s| s.ref_name() == Some(name)))
+                    })
+            });
+            reachable
         }
     }
 
-    /// Try to find `name` in any named [`StackSegment`] and return it along with the stack containing it.
+    /// Try to find `name` in any named [`Segment`] and return it along with the
+    /// [`SegmentStack`] containing it. Resolved against the reconciled partition (total,
+    /// pre-prune), so it answers for natural stacks and totality-kept branches — the
+    /// operation-facing lookup.
     pub fn find_segment_and_stack_by_refname(
         &self,
         name: &gix::refs::FullNameRef,
-    ) -> Option<(&Stack, &StackSegment)> {
-        let (stack_idx, seg_idx) = find_segment_owner_indexes_by_refname(&self.stacks, name)?;
-        let stack = &self.stacks[stack_idx];
+    ) -> Option<(&SegmentStack, &Segment)> {
+        let (stack_idx, seg_idx) = self.segment_graph.segment_location_by_name(name)?;
+        let stack = &self.segment_graph.stacks[stack_idx];
         Some((stack, &stack.segments[seg_idx]))
     }
 
-    /// Try to find a commit in the workspace and return it along with the segment and stack containing it.
+    /// The [`Segment`] whose first-parent extent holds `commit_id`, with its
+    /// [`SegmentStack`] — resolved against the reconciled partition, the operation-facing
+    /// structure, not the pruned display.
     pub fn find_commit_and_containers(
         &self,
         commit_id: gix::ObjectId,
-    ) -> Option<(&Stack, &StackSegment, &StackCommit)> {
-        let (stack_idx, seg_idx, commit_idx) = self.find_owner_indexes_by_commit_id(commit_id)?;
-        let stack = &self.stacks[stack_idx];
-        let seg = &stack.segments[seg_idx];
-        Some((stack, seg, &seg.commits[commit_idx]))
+    ) -> Option<(&SegmentStack, &Segment)> {
+        let (stack_idx, seg_idx) = self.segment_containing(commit_id)?;
+        let stack = &self.segment_graph.stacks[stack_idx];
+        Some((stack, &stack.segments[seg_idx]))
+    }
+
+    /// Like [`Self::find_commit_and_containers()`], but errors if `commit_id` isn't in the workspace.
+    pub fn try_find_commit_and_containers(
+        &self,
+        commit_id: gix::ObjectId,
+    ) -> anyhow::Result<(&SegmentStack, &Segment)> {
+        self.find_commit_and_containers(commit_id)
+            .with_context(|| format!("Commit {commit_id} isn't part of the workspace"))
     }
 
     /// Like [`Self::find_segment_and_stack_by_refname`], but fails with an error.
     pub fn try_find_segment_and_stack_by_refname(
         &self,
         name: &gix::refs::FullNameRef,
-    ) -> anyhow::Result<(&Stack, &StackSegment)> {
+    ) -> anyhow::Result<(&SegmentStack, &Segment)> {
         self.find_segment_and_stack_by_refname(name)
             .with_context(|| {
                 format!(
@@ -413,7 +369,7 @@ impl std::fmt::Debug for Workspace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(&format!("Workspace({})", self.debug_string()))
             .field("kind", &self.kind)
-            .field("stacks", &self.stacks)
+            .field("stacks", &self.display_stacks().unwrap_or_default())
             .field("metadata", &self.metadata)
             .field("target_ref", &self.target_ref)
             .field("target_commit", &self.target_commit)

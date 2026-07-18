@@ -560,7 +560,7 @@ fn workspace_with_target_at_stack_base_no_local_main() -> Result<()> {
 fn ops_on_immutable_refs_fail() -> Result<()> {
     use but_rebase::graph_rebase::{
         Step,
-        mutate::InsertSide,
+        mutate::{InsertSide, Reconnect},
         selector::{SelectorSet, StepRange},
     };
 
@@ -603,7 +603,7 @@ fn ops_on_immutable_refs_fail() -> Result<()> {
                 },
                 SelectorSet::All,
                 SelectorSet::All,
-                false,
+                Reconnect::Heal,
             )
             .unwrap_err()
             .to_string(),

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use but_graph::Workspace;
-use but_rebase::graph_rebase::{Editor, Step, selector};
+use but_rebase::graph_rebase::{Editor, Step, mutate::Reconnect, selector};
 use but_testsupport::{git_status, graph_dag, visualize_commit_graph_all};
 use gix::prelude::ObjectIdExt;
 
@@ -49,7 +49,7 @@ fn disconnect_and_remove_middle_commit_in_linear_history() -> Result<()> {
         target,
         selector::SelectorSet::All,
         selector::SelectorSet::All,
-        false,
+        Reconnect::Heal,
     )?;
     editor.replace(b_selector, Step::None)?;
 
@@ -125,7 +125,7 @@ fn disconnect_and_remove_two_middle_commits_in_linear_history() -> Result<()> {
         range,
         selector::SelectorSet::All,
         selector::SelectorSet::All,
-        false,
+        Reconnect::Heal,
     )?;
     editor.replace(b_selector, Step::None)?;
     editor.replace(a_selector, Step::None)?;
@@ -200,7 +200,7 @@ fn disconnect_and_remove_commit_in_merge_history_rewires_children() -> Result<()
         range,
         selector::SelectorSet::All,
         selector::SelectorSet::All,
-        false,
+        Reconnect::Heal,
     )?;
     editor.replace(a_selector, Step::None)?;
 
@@ -291,7 +291,7 @@ fn disconnect_and_remove_merge_with_two_parents_and_two_children() -> Result<()>
         range,
         selector::SelectorSet::All,
         selector::SelectorSet::All,
-        false,
+        Reconnect::Heal,
     )?;
     editor.replace(merge_selector, Step::None)?;
 
@@ -431,7 +431,7 @@ fn disconnect_and_remove_merge_with_two_parents_and_two_children_from_one_side()
         range,
         selector::SelectorSet::Some(selector::SomeSelectors::new(vec![child_one_selector])?),
         selector::SelectorSet::Some(selector::SomeSelectors::new(vec![parent_one_selector])?),
-        false,
+        Reconnect::Heal,
     )?;
 
     let outcome = editor.rebase()?;
@@ -561,7 +561,7 @@ fn disconnect_remove_merge_with_two_parents_and_two_children_children_only() -> 
         range,
         selector::SelectorSet::None,
         selector::SelectorSet::Some(selector::SomeSelectors::new(vec![parent_one_selector])?),
-        false,
+        Reconnect::Heal,
     )?;
 
     let outcome = editor.rebase()?;
@@ -716,12 +716,12 @@ fn disconnect_fails_when_parents_to_disconnect_is_none() -> Result<()> {
             range,
             selector::SelectorSet::Some(selector::SomeSelectors::new(vec![child_one_selector])?),
             selector::SelectorSet::None,
-            false,
+            Reconnect::Heal,
         )
         .expect_err("expected disconnect to fail for parents=SelectorSet::None");
     assert!(
         err.to_string()
-            .contains("Invalid parents to disconnect: SelectorSet::None is not allowed"),
+            .contains("Invalid parents to disconnect: SelectorSet::None requires Reconnect::Skip"),
         "unexpected error: {err:#}"
     );
 
@@ -792,7 +792,7 @@ fn disconnect_fails_fast_if_parent_to_disconnect_is_not_direct_parent() -> Resul
             range,
             selector::SelectorSet::Some(selector::SomeSelectors::new(vec![child_one_selector])?),
             selector::SelectorSet::Some(selector::SomeSelectors::new(vec![child_one_selector])?),
-            false,
+            Reconnect::Heal,
         )
         .expect_err("expected disconnect to fail for non-parent selector");
     assert!(
@@ -868,7 +868,7 @@ fn disconnect_fails_fast_if_child_to_disconnect_is_not_direct_child() -> Result<
             range,
             selector::SelectorSet::Some(selector::SomeSelectors::new(vec![parent_one_selector])?),
             selector::SelectorSet::Some(selector::SomeSelectors::new(vec![parent_one_selector])?),
-            false,
+            Reconnect::Heal,
         )
         .expect_err("expected disconnect to fail for non-child selector");
     assert!(

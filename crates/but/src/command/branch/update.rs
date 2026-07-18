@@ -343,7 +343,7 @@ fn format_preview(branch_ref: &FullNameRef, result: &IntegrateBranchResult) -> S
     let matching_segment = result
         .workspace
         .graph_workspace
-        .stacks
+        .display_stacks()?
         .iter()
         .find_map(|stack| {
             stack.reference_segments.iter().find_map(|segment| {

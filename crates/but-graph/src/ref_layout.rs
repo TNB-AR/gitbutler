@@ -103,17 +103,32 @@
 /// How much of its commit's incoming edges a reference group carries — which edges ENTER
 /// THROUGH the group's references. Generic over the id space: the graph stores commit ids,
 /// the rebase editor stores the same shape over its pick handles.
+///
+/// # The aliasing rule
+///
+/// `Edges` naming the commit's ENTIRE live edge set resolves to the same edges as `All`,
+/// but the two are not interchangeable: `All` keeps carrying edges added later, an `Edges`
+/// statement never grows. Every placement door normalizes toward `All` when the stated set
+/// covers everything live — the builder's `classify` at authoring, the editor's `place` on
+/// every (re)placement — so settled groups never hold a full-set `Edges` in disguise.
+/// Group-merging comparisons ([`place_in_groups`], [`coalesce_groups`]) are SYNTACTIC over
+/// those normalized statements: a same-(carry, attach) twin folds onto the existing
+/// group's top rather than standing as an unordered position collision. What normalization
+/// cannot settle — a carry copied mid-surgery, before its pick's edges are final — is the
+/// mutation's own job to re-hang once edges settle, and anything that slips through is a
+/// reported position collision at the editor's well-formedness checks, which compare by
+/// RESOLUTION.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupCarry<Id> {
     /// Nothing descends into this group (a root group: remote above a tip, empty top).
     None,
     /// Every edge into the commit descends through this group (a plain stack, or the shared
-    /// group all merge groups converge on).
+    /// group all merge groups converge on) — including edges added AFTER this was stated.
     All,
     /// Exactly these stated edges — one group of a merge. Kept sorted and deduplicated,
     /// keyed by the full `(child, parent number)` edge: two distinct sources can feed one
     /// commit at the same parent number (and one source at two parent numbers), so both coordinates are
-    /// needed.
+    /// needed. Never grows to cover edges added later.
     Edges(Vec<(Id, usize)>),
 }
 
@@ -200,6 +215,33 @@ pub struct RefLayout {
     /// Where the empty chains rest: for each declared chain with no commits of its own,
     /// the commit its branches sit on, in metadata order.
     pub empty_chain_anchors: Vec<EmptyChainAnchor>,
+    /// The declared in-workspace stack partition, in metadata (workspace) order: each stack's
+    /// id and its branch names in declared tip→base order, empty branches included. This is
+    /// `ws_meta`'s in-workspace stack list reduced to what the projection's claiming needs and
+    /// relocated onto the layout, giving the IN-WORKSPACE ref→stack partition one home the
+    /// projection reads instead of re-consulting metadata. Inactive/out-of-workspace stacks
+    /// are deliberately excluded — the frame still reads those from `ws_meta` directly (e.g.
+    /// `bind_stack_identity`, `entry_is_unapplied_branch`), so membership truth is split by
+    /// design. It mirrors the in-workspace
+    /// [`WorkspaceStack`](but_core::ref_metadata::WorkspaceStack)s WITHOUT cross-stack dedup
+    /// (a branch listed in two stacks appears in both) — within-stack duplicates stay the
+    /// claim's concern, exactly as when it read the metadata directly.
+    pub stacks: Vec<StackPartition>,
+}
+
+/// One in-workspace stack's declared partition: its stable id and its branch names in
+/// declared tip→base order (empties included). See [`RefLayout::stacks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackPartition {
+    /// The stable stack id, as declared in the workspace metadata.
+    pub id: but_core::ref_metadata::StackId,
+    /// The stack's branch names, tip→base, exactly as the metadata lists them.
+    pub branches: Vec<gix::refs::FullName>,
+    /// The declared parent edges as `(child_idx, parent_idx)` into [`branches`](Self::branches),
+    /// implied chain adjacency resolved — the DAG declaration
+    /// ([`WorkspaceStackBranch::parents`](but_core::ref_metadata::WorkspaceStackBranch::parents))
+    /// reduced for the claiming. A chain is `(i, i + 1)` pairs.
+    pub parent_edges: Vec<(usize, usize)>,
 }
 
 /// One reference's authoring input to [`RefLayout::from_parts`]: its facts, and — when
@@ -345,11 +387,29 @@ pub fn place_in_groups<Id: PartialEq>(
     carry: GroupCarry<Id>,
     attach: Option<gix::refs::FullName>,
 ) {
-    let joined = attach.as_ref().and_then(|b| {
-        groups
-            .iter()
-            .position(|group| group.members.last() == Some(b) && group.carry == carry)
-    });
+    let joined = attach
+        .as_ref()
+        .and_then(|b| {
+            groups
+                .iter()
+                .position(|group| group.members.last() == Some(b) && group.carry == carry)
+        })
+        // A group already standing at this exact (carry, attach) key is this placement's
+        // home: a parallel twin would put two members at one rank — the unordered position
+        // collision — so the newcomer lands on the twin's top instead. Placement is the
+        // only door to the table, which makes the collision unconstructable rather than
+        // merely checked. `None` carries are exempt: they hold no rank (nothing enters
+        // through them), so independent root groups — a dead ref's retained position, an
+        // empty top — legitimately coexist and must not be folded together.
+        .or_else(|| {
+            (!matches!(carry, GroupCarry::None))
+                .then(|| {
+                    groups
+                        .iter()
+                        .position(|group| group.carry == carry && group.attach == attach)
+                })
+                .flatten()
+        });
     match joined {
         Some(g) => groups[g].members.push(name),
         None => groups.push(RefGroup {

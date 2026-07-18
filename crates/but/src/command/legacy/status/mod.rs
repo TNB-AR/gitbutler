@@ -415,7 +415,7 @@ fn build_status_context<'a>(
             push_statuses_by_segment_id,
             local_commits_by_id,
             remote_commits_by_id,
-            ws.stacks.clone(),
+            ws.display_stacks()?.to_vec(),
             resolved_target,
             commit_id_to_change_id,
         )

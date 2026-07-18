@@ -153,9 +153,16 @@ impl NodeSet {
 }
 
 impl<M: RefMetadata> Editor<'_, M> {
-    /// Build a graph-based workspace projection framed from this editor.
-    pub fn graph_workspace(&self) -> Result<GraphWorkspace> {
-        let mut ws = self.graph_workspace_topology()?;
+    /// Build a graph-based workspace projection framed from this editor, with the
+    /// stack PARTITION supplied by the workspace's segment graph — the one authority
+    /// for which refs and commits form which stack. The editor contributes what is
+    /// editor-native: the selector address space, the above-workspace region, and the
+    /// push/integration status decoration.
+    pub fn graph_workspace(
+        &self,
+        partition: &but_graph::workspace::SegmentGraph,
+    ) -> Result<GraphWorkspace> {
+        let mut ws = self.graph_workspace_topology(partition)?;
         // Every selector in the projection, so the status walks stay scoped to
         // the workspace rather than wandering down the full history.
         let entries: HashSet<Selector> = ws
@@ -172,9 +179,95 @@ impl<M: RefMetadata> Editor<'_, M> {
         Ok(ws)
     }
 
-    /// Build the topological skeleton of the projection (stacks, above-workspace,
-    /// workspace commit) with an empty [`GraphWorkspace::reference_status`].
-    fn graph_workspace_topology(&self) -> Result<GraphWorkspace> {
+    /// Map the segment-graph `partition` into editor selectors: per stack, every
+    /// segment's naming reference and assigned commits. The head is the top segment's
+    /// reference (or its first commit). Refs the editor graph doesn't carry are
+    /// skipped — status decoration would skip them too.
+    fn stacks_from_partition(
+        &self,
+        partition: &but_graph::workspace::SegmentGraph,
+    ) -> Vec<Subgraph> {
+        // Refs that NAME a partition segment belong to exactly that stack — they never
+        // ride along into a sibling that shares their anchor commit.
+        let naming: HashSet<EditorIndex> = partition
+            .stacks
+            .iter()
+            .flat_map(|s| s.segments.iter())
+            .filter_map(|segment| segment.ref_name())
+            .filter_map(|name| self.select_reference(name).ok())
+            .map(|s| s.id)
+            .collect();
+        partition
+            .stacks
+            .iter()
+            .map(|stack| {
+                let mut entries = HashSet::new();
+                let mut heads = Vec::new();
+                for (seg_idx, segment) in stack.segments.iter().enumerate() {
+                    if let Some(name) = segment.ref_name()
+                        && let Ok(sel) = self.select_reference(name)
+                    {
+                        if seg_idx == 0 {
+                            heads.push(sel);
+                        }
+                        entries.insert(sel);
+                    }
+                    for &id in &segment.commits {
+                        if let Some(sel) = self.try_select_commit(id) {
+                            if heads.is_empty() && seg_idx == 0 && segment.tip() == Some(id) {
+                                heads.push(sel);
+                            }
+                            entries.insert(sel);
+                        }
+                    }
+                }
+                if heads.is_empty()
+                    && let Some(&first) = entries.iter().min_by_key(|s| s.id)
+                {
+                    // Deterministic fallback: hash-set iteration order must not pick
+                    // the render seed.
+                    heads.push(first);
+                }
+                Subgraph { heads, entries }
+            })
+            .filter(|subgraph| !subgraph.entries.is_empty())
+            .map(|mut subgraph| {
+                // Riding references join the stack owning their position: the pick their
+                // entering edges resolve through, else their resolved pick — the same
+                // membership the flooded-region attachment uses.
+                let commit_entries: HashSet<EditorIndex> =
+                    subgraph.entries.iter().map(|s| s.id).collect();
+                let additions: Vec<RefIndex> = self
+                    .graph
+                    .positioned_refs()
+                    .filter(|&entry| !naming.contains(&EditorIndex::from(entry)))
+                    .filter(|&entry| {
+                        positions::edges_through(&self.graph, entry)
+                            .iter()
+                            .any(|(child, _)| commit_entries.contains(&EditorIndex::from(*child)))
+                            || positions::resolve_to_pick(&self.graph, EditorIndex::from(entry))
+                                .is_some_and(|pick| {
+                                    commit_entries.contains(&EditorIndex::from(pick))
+                                })
+                    })
+                    .collect();
+                subgraph
+                    .entries
+                    .extend(additions.into_iter().map(|r| Selector {
+                        id: EditorIndex::from(r),
+                    }));
+                subgraph
+            })
+            .collect()
+    }
+
+    /// Build the topological skeleton of the projection (stacks from the supplied
+    /// partition, above-workspace, workspace commit) with an empty
+    /// [`GraphWorkspace::reference_status`].
+    fn graph_workspace_topology(
+        &self,
+        partition: &but_graph::workspace::SegmentGraph,
+    ) -> Result<GraphWorkspace> {
         let Some(entrypoint_ix) = self.head_index() else {
             return Ok(GraphWorkspace::empty());
         };
@@ -206,41 +299,55 @@ impl<M: RefMetadata> Editor<'_, M> {
                 .unwrap_or_default(),
         };
 
-        if on_workspace {
-            // The workspace commit, if present, lives somewhere in `HEAD ^target`.
-            let workspace_commit = region.entries.iter().copied().find_map(|ix| {
-                let id = self.graph.commit_id(ix)?;
-                let gix_commit = self.repo.find_commit(id).ok()?;
-                is_managed_workspace_by_message(gix_commit.message_raw().ok()?).then_some(ix)
-            });
+        // The workspace commit, if present, lives somewhere in `HEAD ^target`.
+        let workspace_commit = on_workspace
+            .then(|| {
+                region.entries.iter().copied().find_map(|ix| {
+                    let id = self.graph.commit_id(ix)?;
+                    let gix_commit = self.repo.find_commit(id).ok()?;
+                    is_managed_workspace_by_message(gix_commit.message_raw().ok()?).then_some(ix)
+                })
+            })
+            .flatten();
 
-            if let Some(workspace_commit_ix) = workspace_commit {
-                let (above_workspace, stacks) =
-                    divide_workspace_into_stacks(&self.graph, region, workspace_commit_ix);
-
-                Ok(GraphWorkspace::topology(
-                    above_workspace.into_subgraph(),
-                    Some(self.new_selector(workspace_commit_ix)),
-                    stacks.into_iter().map(|s| s.into_subgraph()).collect(),
-                ))
-            } else {
-                attach_flooded_refs(&self.graph, &mut region.entries, Some(entrypoint_ix));
-                Ok(GraphWorkspace::topology(
-                    region.into_subgraph(),
-                    None,
-                    vec![],
-                ))
-            }
-        } else {
-            // HEAD is on a plain branch, not the workspace: the whole `HEAD ^target`
-            // region is one stack.
-            attach_flooded_refs(&self.graph, &mut region.entries, Some(entrypoint_ix));
-            Ok(GraphWorkspace::topology(
-                Subgraph::empty(),
-                None,
-                vec![region.into_subgraph()],
-            ))
+        // The stacks come from the PARTITION; the editor only contributes the
+        // above-workspace remainder: everything flooded that no stack claimed and
+        // that isn't the workspace commit itself, refs attached by position.
+        let stacks = self.stacks_from_partition(partition);
+        attach_flooded_refs(&self.graph, &mut region.entries, Some(entrypoint_ix));
+        let stack_entries: HashSet<EditorIndex> = stacks
+            .iter()
+            .flat_map(|s| s.entries.iter())
+            .map(|s| s.id)
+            .collect();
+        // A metadata-less legacy shape can CLAIM the workspace commit into a stack (the
+        // walk starts on it); it then renders there, not as its own section.
+        let workspace_commit = workspace_commit.filter(|ix| !stack_entries.contains(ix));
+        let claimed: HashSet<EditorIndex> =
+            stack_entries.into_iter().chain(workspace_commit).collect();
+        region.entries.retain(|ix| !claimed.contains(ix));
+        region.heads.retain(|ix| !claimed.contains(ix));
+        if region.heads.is_empty() && !region.entries.is_empty() {
+            // The entrypoint was claimed by a stack: re-seed the remainder from its
+            // topmost entries (those no other remaining entry lists as a child).
+            let children: HashSet<EditorIndex> = region
+                .entries
+                .iter()
+                .flat_map(|&ix| self.graph.parents(ix))
+                .map(EditorIndex::from)
+                .collect();
+            region.heads = region
+                .entries
+                .iter()
+                .copied()
+                .filter(|ix| !children.contains(ix))
+                .collect();
         }
+        Ok(GraphWorkspace::topology(
+            region.into_subgraph(),
+            workspace_commit.map(|ix| self.new_selector(ix)),
+            stacks,
+        ))
     }
 
     /// The entrypoint (`HEAD`) reference entry, or `None` if HEAD isn't on a ref.
@@ -332,6 +439,10 @@ impl<M: RefMetadata> Editor<'_, M> {
     /// empty-branch remote-tip fallback that `reference_integrated` has is
     /// intentionally not ported. Without a target there is nothing to integrate
     /// into, so both sets are empty.
+    ///
+    /// NOTE: this and the upstream-integration heuristics are a READ-ONLY projection
+    /// responsibility accreting on the mutation `Editor`. They could live on their own
+    /// type borrowing the editor, keeping the mutation surface focused.
     fn integration(&self, entries: &HashSet<Selector>) -> Result<Integration> {
         let Some(target_ref) = self.project_meta.target_ref.as_ref() else {
             return Ok(Integration::default());
@@ -616,161 +727,6 @@ fn combined_push_status<K: Copy + Eq + std::hash::Hash>(
         }
     }
     own_status
-}
-
-/// Split the region beneath the workspace commit into mutually-exclusive stacks,
-/// returning `(above_workspace, stacks)`.
-///
-/// Membership is computed over PICKS: references are transparent for connectivity (they are
-/// positions, not topology), so a shared ref entry cannot glue two distinct stacks
-/// together. After the pick-flood, each reference joins the stack its position belongs to:
-/// the stack of its entering child, else the stack of its resolved pick, and a group
-/// hanging directly off the workspace commit keeps its own (possibly pick-less) stack —
-/// the empty-branch case.
-fn divide_workspace_into_stacks(
-    graph: &GraphEditor,
-    head_not_target: NodeSet,
-    workspace_commit_ix: EditorIndex,
-) -> (NodeSet, Vec<NodeSet>) {
-    // Each parent of the workspace commit seeds a stack, flooded pick-to-pick: every outgoing
-    // edge resolves through reference/tombstone steps to the pick beneath.
-    let mut initial_stacks = graph
-        .parents(workspace_commit_ix)
-        .iter()
-        .copied()
-        .map(|head| {
-            let mut entries = std::collections::HashSet::new();
-            let mut tips: Vec<PickIndex> = Vec::new();
-            if let Some(pick) = positions::resolve_to_pick(graph, head)
-                && head_not_target.entries.contains(&pick.into())
-            {
-                entries.insert(pick.into());
-                tips.push(pick);
-            }
-            while let Some(tip) = tips.pop() {
-                for parent in graph.parents(tip) {
-                    let Some(pick) = positions::resolve_to_pick(graph, parent) else {
-                        continue;
-                    };
-                    if !head_not_target.entries.contains(&pick.into()) {
-                        continue;
-                    }
-                    if entries.insert(pick.into()) {
-                        tips.push(pick);
-                    }
-                }
-            }
-            NodeSet {
-                heads: vec![head.into()],
-                entries,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    // Merge stacks that share any pick (they aren't actually distinct). The pop-loop takes
-    // from the back, so reverse first: stacks come out in the workspace commit's parent number order,
-    // first parent first.
-    let mut deduplicated = vec![];
-    initial_stacks.reverse();
-    while let Some(mut out) = initial_stacks.pop() {
-        for bix in (0..initial_stacks.len()).rev() {
-            #[expect(clippy::indexing_slicing)]
-            if out
-                .entries
-                .iter()
-                .any(|o| initial_stacks[bix].entries.contains(o))
-            {
-                let b = initial_stacks.swap_remove(bix);
-                out.entries.extend(b.entries);
-                out.heads.extend(b.heads);
-            }
-        }
-        deduplicated.push(out);
-    }
-
-    // Each positioned reference joins the stack its position belongs to: the entering child's
-    // stack (with a group hanging straight off the workspace commit falling back to its
-    // pick's stack — the workspace commit itself is in none), else the resolved pick's stack.
-    // References belonging to neither (e.g. the target's own ref above the excluded target
-    // commit) stay outside every stack.
-    for entry in graph.positioned_refs() {
-        let pick = positions::resolve_to_pick(graph, entry);
-        let entering = positions::edges_through(graph, entry);
-        let by_pick = |a: Option<PickIndex>| {
-            a.and_then(|a| {
-                deduplicated
-                    .iter()
-                    .position(|s| s.entries.contains(&a.into()))
-            })
-        };
-        // Every entering edge must agree on the stack; a group entered from several stacks
-        // (or from the workspace commit itself) falls back to its pick's stack. A root group
-        // (no entering edges) has no stack — no flood ever descended into it.
-        let pick_in_region = pick.is_some_and(|a| head_not_target.entries.contains(&a.into()));
-        let home = match entering.as_slice() {
-            // A root group: no flood ever descended into it — no stack.
-            [] => None,
-            // A single entering edge follows its child's stack, even onto an excluded pick (a stack
-            // bottom resting on the target); a group hanging straight off the workspace
-            // commit falls back to its pick's stack.
-            [(child, _)]
-                if EditorIndex::from(*child) != workspace_commit_ix
-                    && !graph.ambiguous_of(entry) =>
-            {
-                deduplicated
-                    .iter()
-                    .position(|s| s.entries.contains(&EditorIndex::from(*child)))
-                    .or_else(|| pick_in_region.then(|| by_pick(pick)).flatten())
-            }
-            [_] => pick_in_region.then(|| by_pick(pick)).flatten(),
-            // A shared group: every edge must agree on the stack; otherwise it belongs to its
-            // pick's stack when that is in region, or nowhere.
-            many => {
-                let homes: Vec<Option<usize>> = many
-                    .iter()
-                    .map(|(child, _)| {
-                        if EditorIndex::from(*child) == workspace_commit_ix {
-                            None
-                        } else {
-                            deduplicated
-                                .iter()
-                                .position(|s| s.entries.contains(&EditorIndex::from(*child)))
-                        }
-                    })
-                    .collect();
-                match homes.as_slice() {
-                    [Some(first), rest @ ..] if rest.iter().all(|h| *h == Some(*first)) => {
-                        Some(*first)
-                    }
-                    _ => pick_in_region.then(|| by_pick(pick)).flatten(),
-                }
-            }
-        };
-        if let Some(ix) = home {
-            #[expect(clippy::indexing_slicing)]
-            deduplicated[ix].entries.insert(entry.into());
-        }
-    }
-
-    let mut outside = head_not_target.entries.clone();
-    attach_flooded_refs(graph, &mut outside, None);
-    for stack in &deduplicated {
-        outside = outside.difference(&stack.entries).copied().collect();
-    }
-    outside.remove(&workspace_commit_ix);
-
-    let above_workspace = NodeSet {
-        // The entrypoint is the tip of everything above the workspace commit.
-        heads: head_not_target
-            .heads
-            .iter()
-            .cloned()
-            .filter(|h| *h != workspace_commit_ix)
-            .collect(),
-        entries: outside,
-    };
-
-    (above_workspace, deduplicated)
 }
 
 /// Add the references that belong with the walked commits: groups entered by an in-region

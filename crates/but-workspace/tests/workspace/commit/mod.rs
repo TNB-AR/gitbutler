@@ -65,6 +65,7 @@ parent d3cce74a69ee3b0e1cbea65b53908d602d6bda26
 author GitButler <gitbutler@gitbutler.com> 946771200 +0000
 committer GitButler <gitbutler@gitbutler.com> 946771200 +0000
 encoding UTF-8
+gitbutler-workspace-parents refs/heads/add-A
 
 GitButler Workspace Commit
 
@@ -88,7 +89,7 @@ https://docs.gitbutler.com/features/branch-management/integration-branch
             out.to_debug(),
             snapbox::str![[r#"
 Outcome {
-    workspace_commit_id: Sha1(31f3d99d4b12a57c1c21053ab3ae5da160247044),
+    workspace_commit_id: Sha1(0e60227107f657eb6c5d1ce4a2521a1f1fb486a8),
     stacks: [
         Stack { tip: d3cce74, name: "add-A" },
     ],
@@ -128,7 +129,7 @@ f53c910
             out.to_debug(),
             snapbox::str![[r#"
 Outcome {
-    workspace_commit_id: Sha1(391a453230c141ac5f81d7203ac90c7e66ea9acf),
+    workspace_commit_id: Sha1(2b0f584a05fa78d69e953bc5a2f86fdcdeee256f),
     stacks: [
         Stack { tip: 27ab782, name: "add-D" },
         Stack { tip: d3cce74, name: "add-A" },
@@ -154,6 +155,7 @@ parent 115e41b0ffb7fcb56f91a9fb64cf4a7b786c1bea
 author GitButler <gitbutler@gitbutler.com> 946771200 +0000
 committer GitButler <gitbutler@gitbutler.com> 946771200 +0000
 encoding UTF-8
+gitbutler-workspace-parents refs/heads/add-D refs/heads/add-A refs/heads/add-C refs/heads/add-B
 
 GitButler Workspace Commit
 
@@ -249,7 +251,7 @@ https://docs.gitbutler.com/features/branch-management/integration-branch
             out.to_debug(),
             snapbox::str![[r#"
 Outcome {
-    workspace_commit_id: Sha1(24731387ff4bfbd9c803b388d8f65ca64a9d87b3),
+    workspace_commit_id: Sha1(53efd3bcfec888d9a60faac814d00539e66b8049),
     stacks: [
         Stack { tip: d3cce74, name: "add-A" },
         Stack { tip: 34c4591, name: None },
@@ -316,7 +318,7 @@ Outcome {
             out.to_debug(),
             snapbox::str![[r#"
 Outcome {
-    workspace_commit_id: Sha1(b8ba7bd37ac1a1f9a0e7f29ddf83acc249d7b866),
+    workspace_commit_id: Sha1(042643faa832a77f8cc4aefa1191b4a1a1ccd641),
     stacks: [
         Stack { tip: d3cce74, name: "clean-A" },
         Stack { tip: 115e41b, name: "clean-B" },
@@ -370,7 +372,7 @@ Outcome {
             out.to_debug(),
             snapbox::str![[r#"
 Outcome {
-    workspace_commit_id: Sha1(e444bfa38570217271f5df56c3fe26ed57a7e023),
+    workspace_commit_id: Sha1(ed2ea047b2d1f065d7b4e75fb27422dacc5f6344),
     stacks: [
         Stack { tip: d3cce74, name: "clean-A" },
         Stack { tip: bf09eae, name: "conflict-F1" },
@@ -456,7 +458,7 @@ Outcome {
             out.to_debug(),
             snapbox::str![[r#"
 Outcome {
-    workspace_commit_id: Sha1(e25b36b3a4192701e5e91a00d1c2fe07b9888338),
+    workspace_commit_id: Sha1(aada2325e41f418e201e129522c51877715d5b7a),
     stacks: [
         Stack { tip: 8450331, name: "tip-conflicted" },
         Stack { tip: 8ab1c4d, name: "unrelated" },
@@ -529,7 +531,7 @@ Outcome {
             out.to_debug(),
             snapbox::str![[r#"
 Outcome {
-    workspace_commit_id: Sha1(4aede0de89327f3afde3db1ed9f83f368f67d501),
+    workspace_commit_id: Sha1(4eb9a5558eda35ef136d77c31d970a044a585260),
     stacks: [
         Stack { tip: d3cce74, name: "clean-A" },
         Stack { tip: 6777bd8, name: "conflict-C1" },
@@ -560,6 +562,7 @@ parent 115e41b0ffb7fcb56f91a9fb64cf4a7b786c1bea
 author GitButler <gitbutler@gitbutler.com> 946771200 +0000
 committer GitButler <gitbutler@gitbutler.com> 946771200 +0000
 encoding UTF-8
+gitbutler-workspace-parents refs/heads/clean-A refs/heads/conflict-C1 refs/heads/clean-B
 
 GitButler Workspace Commit
 
@@ -607,7 +610,7 @@ fc2bf71
             out.to_debug(),
             snapbox::str![[r#"
 Outcome {
-    workspace_commit_id: Sha1(fd9723d257cd09656a2f8bb24d3dd2138f88b343),
+    workspace_commit_id: Sha1(a9a3d2edc3fc0e9eaabaef87eed061e49cbbe685),
     stacks: [
         Stack { tip: d3cce74, name: "clean-A" },
         Stack { tip: 115e41b, name: "clean-B" },
@@ -637,6 +640,7 @@ parent f8392d239500de94b23f42c8ab5508dae1b3b657
 author GitButler <gitbutler@gitbutler.com> 946771200 +0000
 committer GitButler <gitbutler@gitbutler.com> 946771200 +0000
 encoding UTF-8
+gitbutler-workspace-parents refs/heads/clean-A refs/heads/clean-B refs/heads/conflict-C2
 
 GitButler Workspace Commit
 
@@ -683,7 +687,7 @@ https://docs.gitbutler.com/features/branch-management/integration-branch
             out.to_debug(),
             snapbox::str![[r#"
 Outcome {
-    workspace_commit_id: Sha1(e297aee321879eb991bb5360859cbddb5891a316),
+    workspace_commit_id: Sha1(72d4000eeef2f10ade236b7df9663b227ce7314d),
     stacks: [
         Stack { tip: 6777bd8, name: "conflict-C1" },
         Stack { tip: d3cce74, name: "clean-A" },
@@ -760,6 +764,7 @@ Outcome {
                             .to_full_name(short_name)
                             .expect("known good short ref name"),
                         archived: false,
+                        parents: None,
                     }],
                 })
                 .collect()
