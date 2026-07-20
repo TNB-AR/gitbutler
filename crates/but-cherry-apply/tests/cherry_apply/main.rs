@@ -9,7 +9,7 @@ mod util {
     use but_cherry_apply::{CherryApplyStatus, cherry_apply, cherry_apply_status};
     use but_core::{
         RefMetadata as _, WORKSPACE_REF_NAME,
-        ref_metadata::{StackId, StackKind},
+        ref_metadata::{ProjectedWorkspaceStack, StackId, StackKind},
     };
     use but_ctx::Context;
     use but_testsupport::gix_testtools::tempfile::TempDir;
@@ -19,11 +19,26 @@ mod util {
         // TODO: all this should work without `Context` once it's switched to the new rebase engine,
         //       making this crate either obsolete or proper plumbing.
         let mut ctx = Context::from_repo_for_testing(repo)?;
-        // update the vb-toml metadata - trigger reconciliation and write the vb.toml according to what's there.
         {
-            let _guard = ctx.exclusive_worktree_access();
-            let meta = ctx.legacy_meta()?;
-            meta.write_reconciled(&*ctx.repo.get()?)?;
+            let mut guard = ctx.exclusive_worktree_access();
+            let (mut meta, workspace) =
+                ctx.workspace_and_meta_from_head(guard.write_permission())?;
+            let mut workspace_meta = meta.workspace(WORKSPACE_REF_NAME.try_into()?)?;
+            workspace_meta.reconcile_projected_stacks(
+                workspace
+                    .stacks
+                    .iter()
+                    .map(|stack| ProjectedWorkspaceStack {
+                        id: stack.id,
+                        branches: stack
+                            .segments
+                            .iter()
+                            .filter_map(|segment| segment.ref_name().map(ToOwned::to_owned))
+                            .collect(),
+                    }),
+                |_| StackId::generate(),
+            )?;
+            meta.set_workspace(&workspace_meta)?;
         }
         Ok(TestContext {
             ctx,
