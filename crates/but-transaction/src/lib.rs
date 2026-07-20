@@ -7,7 +7,9 @@ use anyhow::Context as _;
 use bstr::BStr;
 use but_api::WorkspaceState;
 use but_core::{
-    DiffSpec, DryRun, RefMetadata, ref_metadata, sync::RepoExclusive,
+    DiffSpec, DryRun, RefMetadata,
+    ref_metadata::{self, ProjectedWorkspaceStack, StackId},
+    sync::RepoExclusive,
     tree::create_tree::RejectionReason,
 };
 use but_ctx::Context;
@@ -111,6 +113,21 @@ where
     let (should_rollback, outcome) = {
         let context_lines = ctx.settings.context_lines;
         let (repo, mut ws, mut db) = ctx.workspace_mut_and_db_mut_with_perm(perm)?;
+        if let Some(workspace_ref_name) = ws.ref_name() {
+            let mut ws_meta = meta.workspace(workspace_ref_name)?;
+            ws_meta.reconcile_projected_stacks(
+                ws.stacks.iter().map(|stack| ProjectedWorkspaceStack {
+                    id: stack.id,
+                    branches: stack
+                        .segments
+                        .iter()
+                        .filter_map(|segment| segment.ref_name().map(ToOwned::to_owned))
+                        .collect(),
+                }),
+                |_| StackId::generate(),
+            )?;
+            meta.set_workspace(&ws_meta)?;
+        }
 
         let db_tx = db.transaction()?;
 

@@ -1,7 +1,7 @@
 use bstr::ByteSlice as _;
 use but_core::{
     WORKSPACE_REF_NAME,
-    ref_metadata::{StackId, StackKind},
+    ref_metadata::{ProjectedWorkspaceStack, StackId, StackKind},
 };
 
 use crate::branch::{OnWorkspaceMergeConflict, try_find_validated_ref};
@@ -747,6 +747,17 @@ pub fn apply(
         storage.persist(repo)?;
         drop(in_memory_repo);
     }
+    ws_md.reconcile_projected_stacks(
+        ws.stacks.iter().map(|stack| ProjectedWorkspaceStack {
+            id: stack.id,
+            branches: stack
+                .segments
+                .iter()
+                .filter_map(|segment| segment.ref_name().map(ToOwned::to_owned))
+                .collect(),
+        }),
+        |_| StackId::generate(),
+    )?;
     but_core::worktree::safe_checkout_from_head(
         new_head_id,
         repo,

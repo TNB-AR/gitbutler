@@ -2,7 +2,11 @@ use std::borrow::Cow;
 
 use anyhow::{Context as _, Result, anyhow};
 use but_api_macros::but_api;
-use but_core::{DryRun, branch, ref_metadata::StackId, sync::RepoExclusive};
+use but_core::{
+    DryRun, RefMetadata as _, branch,
+    ref_metadata::{ProjectedWorkspaceStack, StackId},
+    sync::RepoExclusive,
+};
 use but_ctx::Context;
 use but_oplog::legacy::{OperationKind, SnapshotDetails, Trailer};
 use but_workspace::ui::ref_info::BranchReference;
@@ -122,6 +126,21 @@ pub fn create_reference_with_perm(
 
     let mut meta = ctx.meta()?;
     let (repo, mut ws, _db) = ctx.workspace_mut_and_db_with_perm(perm)?;
+    if let Some(workspace_ref_name) = ws.ref_name() {
+        let mut ws_meta = meta.workspace(workspace_ref_name)?;
+        ws_meta.reconcile_projected_stacks(
+            ws.stacks.iter().map(|stack| ProjectedWorkspaceStack {
+                id: stack.id,
+                branches: stack
+                    .segments
+                    .iter()
+                    .filter_map(|segment| segment.ref_name().map(ToOwned::to_owned))
+                    .collect(),
+            }),
+            |_| StackId::generate(),
+        )?;
+        meta.set_workspace(&ws_meta)?;
+    }
 
     let maybe_oplog_entry = but_oplog::UnmaterializedOplogSnapshot::from_details_with_perm(
         ctx,

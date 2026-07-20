@@ -2,7 +2,7 @@ use std::{io::Write, ops::DerefMut, path::Path};
 
 use but_core::{
     RefMetadata, RepositoryExt, WORKSPACE_REF_NAME,
-    ref_metadata::{ProjectMeta, StackId, WorkspaceCommitRelation},
+    ref_metadata::{ProjectMeta, ProjectedWorkspaceStack, StackId, WorkspaceCommitRelation},
 };
 use but_meta::VirtualBranchesTomlMetadata;
 #[cfg(feature = "sandbox-but-api")]
@@ -227,7 +227,7 @@ impl Sandbox {
     }
 
     /// Create a metadata instance on the project.
-    pub fn meta(&self) -> impl but_core::RefMetadata {
+    pub fn meta(&self) -> VirtualBranchesTomlMetadata {
         VirtualBranchesTomlMetadata::from_path(
             self.open_repo()
                 .gitbutler_storage_path()
@@ -450,6 +450,55 @@ impl Sandbox {
         }
         let out = ws_data.stacks.iter().map(|s| s.id).collect();
         meta.set_workspace(&ws).unwrap();
+        drop(meta);
+
+        let workspace = {
+            let (graph, _repo, _meta) = self.graph_at_head();
+            graph.into_workspace().unwrap()
+        };
+        let mut meta = self.meta();
+        let mut ws = meta.workspace(r(WORKSPACE_REF_NAME)).unwrap();
+        let mut next_id = branch_names.len() as u128;
+        ws.reconcile_projected_stacks(
+            workspace
+                .stacks
+                .iter()
+                .map(|stack| ProjectedWorkspaceStack {
+                    id: stack.id,
+                    branches: stack
+                        .segments
+                        .iter()
+                        .filter_map(|segment| segment.ref_name().map(ToOwned::to_owned))
+                        .collect(),
+                }),
+            |_| {
+                let id = StackId::from_number_for_testing(next_id);
+                next_id += 1;
+                id
+            },
+        )
+        .unwrap();
+        ws.stacks.retain(|stack| {
+            stack.branches.iter().any(|branch| {
+                workspace.stacks.iter().any(|projected_stack| {
+                    projected_stack.segments.iter().any(|segment| {
+                        segment
+                            .ref_name()
+                            .is_some_and(|name| name == branch.ref_name.as_ref())
+                    })
+                })
+            })
+        });
+        ws.stacks.sort_by_key(|stack| stack.id);
+        meta.set_workspace(&ws).unwrap();
+        let repo = self.open_repo();
+        for stack in meta.data_mut().branches.values_mut() {
+            for branch in &mut stack.heads {
+                if let Ok(mut reference) = repo.find_reference(&branch.name) {
+                    branch.head = reference.peel_to_id().unwrap().detach();
+                }
+            }
+        }
 
         out
     }

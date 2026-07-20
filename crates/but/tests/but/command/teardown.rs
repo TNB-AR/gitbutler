@@ -323,14 +323,14 @@ Attempting to fix workspace stacks...
     [..]
     [..]
 
-  ✓ Will check out: A
+  ✓ Will check out: B
 
-→ Checking out A...
-  ✓ Checked out: A
+→ Checking out B...
+  ✓ Checked out: B
 
 ✓ Successfully exited GitButler mode!
 
-You are now on branch: A
+You are now on branch: B
 
 To return to GitButler mode, run:
   but setup
@@ -338,9 +338,9 @@ To return to GitButler mode, run:
 
 "#]]);
 
-    // Verify we're on branch A
+    // Verify we're on branch B
     let output = env.invoke_git("rev-parse --abbrev-ref HEAD");
-    assert_eq!(output, "A");
+    assert_eq!(output, "B");
 
     // Verify that changes to file A AND B are present
     let file_a_path = env.projects_root().join("FileForA");
