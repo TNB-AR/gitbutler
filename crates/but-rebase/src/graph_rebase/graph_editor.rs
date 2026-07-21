@@ -523,8 +523,8 @@ impl GraphEditor {
         below: Option<RefIndex>,
     ) {
         let carry = self.classify(on, entering);
-        self.extract(entry);
-        self.place(entry, on, carry, below);
+        let vacated = self.extract(entry);
+        self.place(entry, on, carry, below, vacated);
         self.set_ambiguous(entry, ambiguous);
     }
 
@@ -577,8 +577,8 @@ impl GraphEditor {
         };
         let carry = self.layout[&key][g].carry.clone();
         let ambiguous = self.refs[mate.0].ambiguous;
-        self.extract(entry);
-        self.place(entry, key, carry, below);
+        let vacated = self.extract(entry);
+        self.place(entry, key, carry, below, vacated);
         self.set_ambiguous(entry, ambiguous);
     }
 
@@ -594,8 +594,8 @@ impl GraphEditor {
         }
         let below = self.below_of(entry);
         let carry = self.carry_of(entry).cloned().unwrap_or(GroupCarry::All);
-        self.extract(entry);
-        self.place(entry, onto, carry, below);
+        let vacated = self.extract(entry);
+        self.place(entry, onto, carry, below, vacated);
     }
 
     /// Re-hang `entry` onto `below` — an adjacency statement only; its key, carry, and
@@ -608,8 +608,8 @@ impl GraphEditor {
             return;
         }
         let carry = self.carry_of(entry).cloned().unwrap_or(GroupCarry::All);
-        self.extract(entry);
-        self.place(entry, on, carry, below);
+        let vacated = self.extract(entry);
+        self.place(entry, on, carry, below, vacated);
     }
 
     /// Point a dead reference's kept position at `on` — the bare pointer that stale
@@ -622,8 +622,8 @@ impl GraphEditor {
             "retained positions belong to dead references"
         );
         self.splice(entry);
-        self.extract(entry);
-        self.place(entry, on, GroupCarry::None, None);
+        let vacated = self.extract(entry);
+        self.place(entry, on, GroupCarry::None, None, vacated);
         self.set_ambiguous(entry, false);
     }
 
@@ -696,12 +696,15 @@ impl GraphEditor {
     /// group split off as their own group attached to `entry` (they keep sitting on it,
     /// wherever it goes next), and groups attached to `entry` stay attached. The caller
     /// re-places the entry immediately.
-    fn extract(&mut self, entry: RefIndex) {
-        let Some((key, g, i)) = self.locate(entry) else {
-            return;
-        };
+    fn extract(&mut self, entry: RefIndex) -> Option<gix::refs::FullName> {
+        let (key, g, i) = self.locate(entry)?;
         let name = self.name_of(entry).clone();
         let groups = self.layout.get_mut(&key).expect("just located");
+        let vacated = if i > 0 {
+            Some(groups[g].members[i - 1].clone())
+        } else {
+            groups[g].attach.clone()
+        };
         let above = groups[g].members.split_off(i + 1);
         groups[g].members.pop();
         if !above.is_empty() {
@@ -718,6 +721,7 @@ impl GraphEditor {
         if groups.is_empty() {
             self.layout.remove(&key);
         }
+        vacated
     }
 
     /// Put the (extracted or fresh) `entry` into the table at `key` via the shared
@@ -728,10 +732,22 @@ impl GraphEditor {
         key: PickIndex,
         carry: GroupCarry,
         attach: Option<RefIndex>,
+        vacated: Option<gix::refs::FullName>,
     ) {
         let carry = self.normalize_carry(key, carry);
         let name = self.name_of(entry).clone();
         let attach = attach.map(|b| self.name_of(b).clone());
+        // The entry may be sliding UNDER one of its own riders: a group still attached to
+        // it (extract leaves riders hanging on the moved entry) that contains the new
+        // below. Left alone the attach chain closes on itself; the rider takes the spot
+        // the entry vacated instead.
+        if let (Some(b), Some(groups)) = (attach.as_ref(), self.layout.get_mut(&key)) {
+            for group in groups.iter_mut() {
+                if group.attach.as_ref() == Some(&name) && group.members.contains(b) {
+                    group.attach = vacated.clone();
+                }
+            }
+        }
         but_graph::ref_layout::place_in_groups(
             self.layout.entry(key).or_default(),
             name,
