@@ -1,7 +1,10 @@
+use std::path::PathBuf;
+
 use anyhow::anyhow;
+use bstr::BStr;
 use but_testsupport::Sandbox;
 use crossterm::event::*;
-use snapbox::{file, str};
+use snapbox::{ToDebug, file, str};
 use temp_env::with_var;
 
 use crate::CliId;
@@ -24,6 +27,43 @@ mod move_tests;
 mod rub_tests;
 mod stack_tests;
 mod utils;
+
+#[test]
+fn directory_watcher_paths_affect_nested_uncommitted_details() {
+    assert!(
+        super::app::changed_paths_affect_uncommitted_details(
+            &[PathBuf::from("old")],
+            [BStr::new(b"old/file.txt")],
+            std::iter::empty(),
+        ),
+        "a directory event affects uncommitted files nested below it"
+    );
+}
+
+#[test]
+fn unrelated_watcher_paths_do_not_affect_uncommitted_details() {
+    assert!(
+        !super::app::changed_paths_affect_uncommitted_details(
+            &[PathBuf::from("scenario.lock")],
+            [BStr::new(b"old/file.txt")],
+            [BStr::new(b"new/file.txt")],
+        ),
+        "an unrelated watcher path cannot change uncommitted details"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn native_windows_watcher_paths_match_git_paths() {
+    assert!(
+        super::app::changed_paths_affect_uncommitted_details(
+            &[PathBuf::from(r"dir\file.txt")],
+            std::iter::empty(),
+            [BStr::new(b"dir/file.txt")],
+        ),
+        "native Windows separators match separators in Git paths"
+    );
+}
 
 #[test]
 fn git_activity_only_reloads_for_a_new_head() {
@@ -642,13 +682,13 @@ fn esc_leaves_rub_mode() {
         .assert_current_line_eq(str!["╭┄zz [uncommitted]"]);
 
     tui.input(KeyCode::Down)
-        .assert_current_line_eq(str!["┊   v A test.txt"]);
+        .assert_current_line_eq(str!["┊   vo A test.txt"]);
 
     tui.input('r')
-        .assert_current_line_eq(str!["┊   << source >> << noop >> v A test.txt"]);
+        .assert_current_line_eq(str!["┊   << source >> << noop >> vo A test.txt"]);
 
     tui.input(KeyCode::Esc)
-        .assert_current_line_eq(str!["┊   v A test.txt"]);
+        .assert_current_line_eq(str!["┊   vo A test.txt"]);
 }
 
 #[test]
@@ -663,16 +703,16 @@ fn mode_key_r_enters_and_escape_leaves_rub_mode() {
     tui.reload();
 
     tui.input(KeyCode::Down)
-        .assert_current_line_eq(str!["┊   v A test.txt"]);
+        .assert_current_line_eq(str!["┊   vo A test.txt"]);
 
     tui.input('r')
         .assert_rendered_term_svg_eq(file![
             "snapshots/mode_toggle_key_r_enters_and_leaves_rub_mode_001.svg"
         ])
-        .assert_current_line_eq(str!["┊   << source >> << noop >> v A test.txt"]);
+        .assert_current_line_eq(str!["┊   << source >> << noop >> vo A test.txt"]);
 
     tui.input(KeyCode::Esc)
-        .assert_current_line_eq(str!["┊   v A test.txt"]);
+        .assert_current_line_eq(str!["┊   vo A test.txt"]);
 }
 
 #[test]
@@ -687,10 +727,10 @@ fn rub_mode_shift_j_lands_on_first_selectable_in_next_branch() {
     tui.reload();
 
     tui.input(KeyCode::Down)
-        .assert_current_line_eq(str!["┊   v A test.txt"]);
+        .assert_current_line_eq(str!["┊   vo A test.txt"]);
 
     tui.input('r')
-        .assert_current_line_eq(str!["┊   << source >> << noop >> v A test.txt"]);
+        .assert_current_line_eq(str!["┊   << source >> << noop >> vo A test.txt"]);
 
     tui.input((KeyModifiers::SHIFT, 'J'))
         .assert_current_line_eq(str!["┊●   << amend >> tpm add A"]);
@@ -708,10 +748,10 @@ fn rub_mode_shift_j_can_jump_between_branches() {
     tui.reload();
 
     tui.input(KeyCode::Down)
-        .assert_current_line_eq(str!["┊   v A test.txt"]);
+        .assert_current_line_eq(str!["┊   vo A test.txt"]);
 
     tui.input('r')
-        .assert_current_line_eq(str!["┊   << source >> << noop >> v A test.txt"]);
+        .assert_current_line_eq(str!["┊   << source >> << noop >> vo A test.txt"]);
 
     tui.input((KeyModifiers::SHIFT, 'J'))
         .assert_current_line_eq(str!["┊●   << amend >> tpm add A"]);
@@ -732,10 +772,10 @@ fn rub_mode_shift_k_jumps_to_first_selectable_in_previous_branch() {
     tui.reload();
 
     tui.input(KeyCode::Down)
-        .assert_current_line_eq(str!["┊   v A test.txt"]);
+        .assert_current_line_eq(str!["┊   vo A test.txt"]);
 
     tui.input('r')
-        .assert_current_line_eq(str!["┊   << source >> << noop >> v A test.txt"]);
+        .assert_current_line_eq(str!["┊   << source >> << noop >> vo A test.txt"]);
 
     tui.input((KeyModifiers::SHIFT, 'J'))
         .assert_current_line_eq(str!["┊●   << amend >> tpm add A"]);
@@ -820,7 +860,7 @@ fn rubbing() {
         .assert_current_line_eq(str!["╭┄zz [uncommitted]"]);
 
     tui.input(KeyCode::Down)
-        .assert_current_line_eq(str!["┊   v A test.txt"]);
+        .assert_current_line_eq(str!["┊   vo A test.txt"]);
 
     tui.input(KeyCode::Down)
         .assert_current_line_eq(str!["┊╭┄g0 [A]"]);
@@ -829,10 +869,10 @@ fn rubbing() {
         .assert_current_line_eq(str!["┊●   1 (no commit message) (no changes)"]);
 
     tui.input([KeyCode::Up, KeyCode::Up])
-        .assert_current_line_eq(str!["┊   v A test.txt"]);
+        .assert_current_line_eq(str!["┊   vo A test.txt"]);
 
     tui.input('r')
-        .assert_current_line_eq(str!["┊   << source >> << noop >> v A test.txt"]);
+        .assert_current_line_eq(str!["┊   << source >> << noop >> vo A test.txt"]);
 
     tui.input(KeyCode::Down)
         .assert_current_line_eq(str!["┊●   << amend >> 1 (no commit message) (no changes)"]);
@@ -1080,10 +1120,41 @@ fn pick_changes_mode() {
         _ => panic!("unexpected outcome {outcome:#?}"),
     };
 
-    for id in &cli_ids {
-        assert!(matches!(dbg!(id), CliId::UncommittedHunkOrFile(..)));
-    }
-    assert_eq!(cli_ids.len(), 1);
+    let actual = cli_ids
+        .into_iter()
+        .map(|id| {
+            if let CliId::UncommittedHunkOrFile(hunk) = id {
+                hunk
+            } else {
+                panic!("expected hunk, got {id:#?}")
+            }
+        })
+        .map(|hunk| {
+            (
+                hunk.id,
+                hunk.hunk_assignments.head.path,
+                hunk.is_entire_file,
+            )
+        })
+        .collect::<Vec<_>>();
+    snapbox::assert_data_eq!(
+        actual.to_debug(),
+        snapbox::str![[r#"
+[
+    (
+        "kl",
+        "one",
+        true,
+    ),
+    (
+        "kl:synthetic-id-0",
+        "one",
+        false,
+    ),
+]
+
+"#]]
+    );
 }
 
 #[test]
@@ -1140,10 +1211,41 @@ fn stays_in_pick_change_mode_after_full_screen_details() {
         _ => panic!("unexpected outcome {outcome:#?}"),
     };
 
-    for id in &cli_ids {
-        assert!(matches!(dbg!(id), CliId::UncommittedHunkOrFile(..)));
-    }
-    assert_eq!(cli_ids.len(), 1);
+    let actual = cli_ids
+        .into_iter()
+        .map(|id| {
+            if let CliId::UncommittedHunkOrFile(hunk) = id {
+                hunk
+            } else {
+                panic!("expected hunk, got {id:#?}")
+            }
+        })
+        .map(|hunk| {
+            (
+                hunk.id,
+                hunk.hunk_assignments.head.path,
+                hunk.is_entire_file,
+            )
+        })
+        .collect::<Vec<_>>();
+    snapbox::assert_data_eq!(
+        actual.to_debug(),
+        snapbox::str![[r#"
+[
+    (
+        "kl",
+        "one",
+        true,
+    ),
+    (
+        "kl:synthetic-id-0",
+        "one",
+        false,
+    ),
+]
+
+"#]]
+    );
 }
 
 #[test]

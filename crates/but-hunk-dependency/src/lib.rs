@@ -149,7 +149,7 @@ pub fn new_stacks_to_input_stacks(
     workspace: &but_graph::Workspace,
 ) -> anyhow::Result<Vec<InputStack>> {
     workspace
-        .stacks
+        .display_stacks()?
         .iter()
         .map(|stack| {
             let commits = stack

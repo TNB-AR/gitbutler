@@ -7,19 +7,13 @@ import {
 	useCommitReword,
 	useCommitUncommit,
 } from "#ui/api/mutations.ts";
-import { forgeInfoOptions } from "#ui/api/queries.ts";
+import { forgeInfoOptions, headInfoQueryOptions } from "#ui/api/queries.ts";
 import { classes } from "#ui/components/classes.ts";
 import { GraphSegment } from "#ui/components/GraphSegment.tsx";
 import { Icon } from "#ui/components/Icon.tsx";
 import { TooltipPopup } from "#ui/components/Tooltip.tsx";
 import { assert } from "#ui/assert.ts";
-import {
-	commitBody,
-	commitForgeUrl,
-	commitIsDiverged,
-	commitTitle,
-	rewrittenCommitSelection,
-} from "#ui/commit.ts";
+import { commitBody, commitForgeUrl, commitIsDiverged, commitTitle } from "#ui/commit.ts";
 import { errorMessageForToast } from "#ui/errors.ts";
 import { outlineHotkeys, selectionOperationHotkeys, toElectronAccelerator } from "#ui/hotkeys.ts";
 import {
@@ -33,34 +27,28 @@ import { branchOperand, commitOperand, operandEquals, type CommitOperand } from 
 import { projectSlice } from "#ui/projects/state.ts";
 import { focusSelectionScope } from "#ui/selection-scopes.ts";
 import { useAppDispatch, useAppSelector } from "#ui/store.ts";
-import { RelativeTo, type Commit } from "@gitbutler/but-sdk";
-import { Toast, Tooltip } from "@base-ui/react";
-import { Toolbar } from "@base-ui/react/toolbar";
+import type { Commit } from "@gitbutler/but-sdk";
+import { Toast, Toolbar, Tooltip } from "@base-ui/react";
 import { useQuery } from "@tanstack/react-query";
 import { ComponentProps, FC, use, useOptimistic, useTransition } from "react";
 import { RowCheckbox, RowLabel, RowLabelContainer, RowToolbar } from "../Row.tsx";
 import { getRowButtonClassName } from "../Row-utils.ts";
 import { NavigationIndexContext } from "../OutlineNavigationIndexContext.ts";
-import { commitMessageInputId } from "../CommitForm.tsx";
 import { InlineEditor } from "./InlineEditor.tsx";
 import { insertBlankCommitMenuItem } from "./insertBlankCommitMenuItem.ts";
 import { ItemRow } from "./ItemRow.tsx";
 import { selectAfterDiscardedCommit } from "./selectAfterDiscardedCommit.ts";
 import styles from "./CommitRow.module.css";
-
-const focusCommitMessageInput = () => {
-	document.getElementById(commitMessageInputId)?.focus();
-};
+import { getHeadInfoIndex } from "#ui/api/ref-info.ts";
 
 export const CommitRow: FC<
 	{
 		commit: Commit;
 		projectId: string;
-		isCommitTarget: boolean;
 		dryRunCommit: Commit | null;
 		checkCommit: (evt: { commitId: string; shiftKey: boolean }) => void;
 	} & ComponentProps<"div">
-> = ({ commit, projectId, isCommitTarget, dryRunCommit, checkCommit, ...restProps }) => {
+> = ({ commit, projectId, dryRunCommit, checkCommit, ...restProps }) => {
 	const { data: forgeInfo } = useQuery(forgeInfoOptions(projectId));
 	const mforgeUrl = forgeInfo && commitForgeUrl(commit, forgeInfo);
 
@@ -143,10 +131,16 @@ export const CommitRow: FC<
 		);
 	};
 
+	const { data: headInfoIndex } = useQuery({
+		...headInfoQueryOptions(projectId),
+		select: getHeadInfoIndex,
+	});
+
 	const deleteCommit = () => {
 		const selectionAfterDiscard = selectAfterDiscardedCommit({
 			navigationIndex,
 			commit: commitOperandV,
+			headInfoIndex,
 		});
 
 		commitDiscard(
@@ -157,13 +151,17 @@ export const CommitRow: FC<
 			},
 			{
 				onSuccess: (response) => {
+					const newId =
+						selectionAfterDiscard?._tag === "Commit"
+							? response.workspace.replacedCommits[selectionAfterDiscard.commitId]
+							: undefined;
+					const latestSelectionAfterDiscard =
+						newId === undefined ? selectionAfterDiscard : commitOperand({ commitId: newId });
+
 					dispatch(
 						projectSlice.actions.selectOutline({
 							projectId,
-							selection: rewrittenCommitSelection({
-								selection: selectionAfterDiscard,
-								replacedCommits: response.workspace.replacedCommits,
-							}),
+							selection: latestSelectionAfterDiscard,
 						}),
 					);
 				},
@@ -220,19 +218,8 @@ export const CommitRow: FC<
 		});
 	};
 
-	const relativeTo: RelativeTo = { type: "commit", subject: commit.id };
-
 	const amendCommit = () => {
 		commitAmend({ commitId: commit.id });
-	};
-
-	const setCommitTarget = () => {
-		dispatch(projectSlice.actions.setCommitTarget({ projectId, commitTarget: relativeTo }));
-	};
-
-	const composeCommitHere = () => {
-		setCommitTarget();
-		focusCommitMessageInput();
 	};
 
 	const openCommitInBrowser = async (): Promise<void> => {
@@ -263,18 +250,6 @@ export const CommitRow: FC<
 			accelerator: toElectronAccelerator(selectionOperationHotkeys.cut.hotkey),
 		}),
 		nativeMenuSeparator,
-		nativeMenuItem({
-			label: "Compose Commit Here",
-			accelerator: toElectronAccelerator(outlineHotkeys.composeCommitHere.hotkey),
-			onSelect: composeCommitHere,
-			enabled: isDefaultMode,
-		}),
-		nativeMenuItem({
-			label: "Set Commit Target",
-			accelerator: toElectronAccelerator(outlineHotkeys.setCommitTarget.hotkey),
-			onSelect: setCommitTarget,
-			enabled: isDefaultMode,
-		}),
 		nativeMenuItem({
 			label: "Copy",
 			submenu: [
@@ -350,7 +325,6 @@ export const CommitRow: FC<
 				void showNativeContextMenu(event, menuItems);
 			}}
 			className={classes(restProps.className, styles.row)}
-			isCommitTarget={isCommitTarget}
 		>
 			<div className={styles.iconWithCheckbox}>
 				<GraphSegment

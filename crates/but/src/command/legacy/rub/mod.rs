@@ -28,7 +28,10 @@ use nonempty::NonEmpty;
 use crate::{
     CliError, CliId, IdMap, bad_input,
     command::legacy::rub::assign::stack_id_to_branch_name,
-    id::parser::{IdResolutionError, parse_sources_with_disambiguation, prompt_for_disambiguation},
+    id::parser::{
+        IdResolutionError, parse_sources_with_disambiguation,
+        parse_uncommitted_sources_with_disambiguation, prompt_for_disambiguation,
+    },
     utils::{OutputChannel, diff_specs::DiffSpecBuilder, shorten_object_id},
 };
 
@@ -286,7 +289,13 @@ impl<'a> UncommittedToCommitOperation<'a> {
     pub(crate) fn execute(self, ctx: &mut Context, out: &mut OutputChannel) -> anyhow::Result<()> {
         let result = self.execute_inner(ctx)?;
         if let Some(out) = out.for_human() {
-            let new_commit = theme::new_commit_ref(ctx, result.new_commit)?;
+            let new_commit = if let Some(id) = result.new_commit {
+                let repo = ctx.repo.get()?;
+                theme::Commit(id, Some(crate::utils::get_change_id_for_commit(&repo, id)?))
+                    .to_string()
+            } else {
+                String::new()
+            };
             writeln!(out, "Amended {} → {new_commit}", self.description)?;
         } else if let Some(out) = out.for_json() {
             out.write_value(serde_json::json!({
@@ -304,6 +313,7 @@ impl<'a> UncommittedToCommitOperation<'a> {
             let (_guard, repo, ws, mut db) = ctx.workspace_and_db_mut()?;
             let mut builder = DiffSpecBuilder::new(&mut db, &repo, &ws, context_lines);
             builder.push_hunk_assignments(self.hunk_assignments.iter().copied().cloned())?;
+            builder.reconcile_worktree_diff_specs()?;
             builder.into_diff_specs()
         };
         but_api::commit::amend::commit_amend(ctx, self.oid, changes, DryRun::No)
@@ -452,7 +462,13 @@ impl StackToCommitOperation {
         let result = self.execute_inner(ctx)?;
         if let Some(out) = out.for_human() {
             let t = theme::get();
-            let new_commit = theme::new_commit_ref(ctx, result.new_commit)?;
+            let new_commit = if let Some(id) = result.new_commit {
+                let repo = ctx.repo.get()?;
+                theme::Commit(id, Some(crate::utils::get_change_id_for_commit(&repo, id)?))
+                    .to_string()
+            } else {
+                String::new()
+            };
             writeln!(
                 out,
                 "Amended files assigned to {} → {}",
@@ -482,7 +498,13 @@ impl UncommittedAreaToCommitOperation {
     pub(crate) fn execute(self, ctx: &mut Context, out: &mut OutputChannel) -> anyhow::Result<()> {
         let result = self.execute_inner(ctx)?;
         if let Some(out) = out.for_human() {
-            let new_commit = theme::new_commit_ref(ctx, result.new_commit)?;
+            let new_commit = if let Some(id) = result.new_commit {
+                let repo = ctx.repo.get()?;
+                theme::Commit(id, Some(crate::utils::get_change_id_for_commit(&repo, id)?))
+                    .to_string()
+            } else {
+                String::new()
+            };
             writeln!(out, "Amended uncommitted files → {new_commit}")?;
         } else if let Some(out) = out.for_json() {
             out.write_value(serde_json::json!({
@@ -561,12 +583,17 @@ impl CommitToUncommittedAreaOperation {
     ) -> anyhow::Result<()> {
         self.execute_inner(ctx)?;
         if let Some(out) = out.for_human() {
-            let repo = ctx.repo.get()?;
             if self.commits.len() == 1 {
+                let commit_id = *self.commits.first();
                 writeln!(
                     out,
                     "Uncommitted {}",
-                    theme::CommitRef(id_map, &repo, *self.commits.first())
+                    theme::Commit(
+                        commit_id,
+                        id_map
+                            .change_id_ref(commit_id)
+                            .map(|change_id| change_id.change_id.clone()),
+                    )
                 )?;
             } else {
                 writeln!(out, "Uncommitted {} commits", self.commits.len())?;
@@ -599,11 +626,15 @@ impl CommitToStackOperation {
         self.execute_inner(ctx)?;
         if let Some(out) = out.for_human() {
             let t = theme::get();
-            let repo = ctx.repo.get()?;
             writeln!(
                 out,
                 "Uncommitted {} to {}",
-                theme::CommitRef(id_map, &repo, self.oid),
+                theme::Commit(
+                    self.oid,
+                    id_map
+                        .change_id_ref(self.oid)
+                        .map(|change_id| change_id.change_id.clone()),
+                ),
                 stack_id_to_branch_name(ctx, self.stack)
                     .map(|b| t.local_branch.paint(format!("[{b}]")))
                     .unwrap_or_else(|| t.important.paint("stack")),
@@ -635,13 +666,19 @@ impl SquashCommitsOperation {
     ) -> anyhow::Result<()> {
         let result = self.execute_inner(ctx)?;
         if let Some(out) = out.for_human() {
-            let repo = ctx.repo.get()?;
-            let new_commit = theme::new_commit_ref(ctx, result.new_commit)?;
+            let source_id = *self.sources.first();
+            let source_change_id = id_map
+                .change_id_ref(source_id)
+                .map(|change_id| change_id.change_id.clone());
+            let target_change_id = id_map
+                .change_id_ref(self.destination)
+                .map(|change_id| change_id.change_id.clone());
+            let new_commit = theme::Commit(result.new_commit, target_change_id);
             if self.sources.len() == 1 {
                 writeln!(
                     out,
                     "Squashed {} → {}",
-                    theme::CommitRef(id_map, &repo, *self.sources.first()),
+                    theme::Commit(source_id, source_change_id),
                     new_commit,
                 )?;
             } else {
@@ -685,11 +722,15 @@ impl<'a> MoveCommitToBranchOperation<'a> {
         self.execute_inner(ctx)?;
         if let Some(out) = out.for_human() {
             let t = theme::get();
-            let repo = ctx.repo.get()?;
             writeln!(
                 out,
                 "Moved {} → {}",
-                theme::CommitRef(id_map, &repo, self.oid),
+                theme::Commit(
+                    self.oid,
+                    id_map
+                        .change_id_ref(self.oid)
+                        .map(|change_id| change_id.change_id.clone()),
+                ),
                 t.local_branch.paint(format!("[{}]", self.name))
             )?;
         } else if let Some(out) = out.for_json() {
@@ -768,7 +809,13 @@ impl<'a> BranchToCommitOperation<'a> {
         let result = self.execute_inner(ctx)?;
         if let Some(out) = out.for_human() {
             let t = theme::get();
-            let new_commit = theme::new_commit_ref(ctx, result.new_commit)?;
+            let new_commit = if let Some(id) = result.new_commit {
+                let repo = ctx.repo.get()?;
+                theme::Commit(id, Some(crate::utils::get_change_id_for_commit(&repo, id)?))
+                    .to_string()
+            } else {
+                String::new()
+            };
             writeln!(
                 out,
                 "Amended assigned files {} → {}",
@@ -1495,11 +1542,15 @@ pub(crate) fn handle_uncommit(
                     but_api::commit::discard_commit::commit_discard(ctx, commit_id, DryRun::No)?;
 
                     if !json_mode && let Some(out) = out.for_human() {
-                        let repo = ctx.repo.get()?;
                         writeln!(
                             out,
                             "Discarded {}",
-                            theme::CommitRef(&id_map, &repo, commit_id)
+                            theme::Commit(
+                                commit_id,
+                                id_map
+                                    .change_id_ref(commit_id)
+                                    .map(|change_id| change_id.change_id.clone()),
+                            )
                         )?;
                     }
                 }
@@ -1630,12 +1681,16 @@ fn uncommit_committed_files(
     if !result.failures.is_empty()
         && let Some(out) = out.for_human()
     {
-        let repo = ctx.repo.get()?;
         for failure in &result.failures {
             writeln!(
                 out,
                 "Warning: could not uncommit changes from {}: {}",
-                theme::CommitRef(id_map, &repo, failure.commit_id),
+                theme::Commit(
+                    failure.commit_id,
+                    id_map
+                        .change_id_ref(failure.commit_id)
+                        .map(|change_id| change_id.change_id.clone()),
+                ),
                 failure.error
             )?;
         }
@@ -1665,7 +1720,7 @@ pub(crate) fn handle_amend(
     let id_map = IdMap::new_from_context(ctx, None, guard.read_permission())?;
     let mut files = Vec::new();
     for file_str in file_strs {
-        files.extend(parse_sources_with_disambiguation(
+        files.extend(parse_uncommitted_sources_with_disambiguation(
             ctx, &id_map, file_str, out,
         )?);
     }
@@ -1803,8 +1858,8 @@ pub(crate) fn handle_stage(
 ) -> anyhow::Result<()> {
     let t = theme::get();
     let id_map = IdMap::legacy_new_from_context(ctx, None)?;
-    let files =
-        parse_sources_with_disambiguation(ctx, &id_map, file_or_hunk_str, out).map_err(|err| {
+    let files = parse_uncommitted_sources_with_disambiguation(ctx, &id_map, file_or_hunk_str, out)
+        .map_err(|err| {
             stage_resolution_error(err, |err| {
                 StageBadInput::file_or_hunk(file_or_hunk_str, err)
             })
@@ -1988,7 +2043,7 @@ pub(crate) fn handle_unstage(
 ) -> anyhow::Result<()> {
     let t = theme::get();
     let id_map = IdMap::legacy_new_from_context(ctx, None)?;
-    let files = parse_sources_with_disambiguation(ctx, &id_map, file_or_hunk_str, out)?;
+    let files = parse_uncommitted_sources_with_disambiguation(ctx, &id_map, file_or_hunk_str, out)?;
 
     // Validate that all files are uncommitted or a path prefix
     for file in &files {
@@ -2023,12 +2078,16 @@ pub(crate) fn handle_unstage(
         }
     }
 
-    // Call the main rub handler with "zz" as target to unassign
-    handle(
+    // Unassign the already-resolved files directly; re-parsing the raw string
+    // through the full namespace could hit the very shadowing the scoped
+    // resolution above just avoided.
+    let target = id_map.uncommitted().clone();
+    handle_resolved(
         ctx,
+        &id_map,
         out,
-        file_or_hunk_str,
-        "zz",
+        files,
+        target,
         MessageCombinationStrategy::KeepBoth,
     )
 }

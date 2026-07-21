@@ -77,7 +77,7 @@ pub fn create_virtual_branch(
             .as_ref()
             .and_then(|meta| meta.review.pull_request);
 
-        let out = StackEntryNoOpt {
+        StackEntryNoOpt {
             id: stack
                 .id
                 .context("BUG: all new stacks are created with an ID")?,
@@ -90,9 +90,7 @@ pub fn create_virtual_branch(
             tip,
             order: Some(stack_idx),
             is_checked_out: false,
-        };
-
-        out
+        }
     };
     Ok(stack_entry)
 }

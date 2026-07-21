@@ -10,29 +10,16 @@ import {
 import { forgeInfoOptions, headInfoQueryOptions } from "#ui/api/queries.ts";
 import { decodeBytes } from "#ui/api/bytes.ts";
 import { getHeadInfoIndex } from "#ui/api/ref-info.ts";
-import { commitForgeUrl, rewrittenCommitSelection } from "#ui/commit.ts";
+import { commitForgeUrl } from "#ui/commit.ts";
 import { outlineHotkeys } from "#ui/hotkeys.ts";
-import {
-	branchOperand,
-	commitOperand,
-	operandIdentityKey,
-	uncommittedChangesOperand,
-	type Operand,
-} from "#ui/operands.ts";
+import { branchOperand, commitOperand, operandIdentityKey, type Operand } from "#ui/operands.ts";
 import { projectSlice } from "#ui/projects/state.ts";
-import { focusSelectionScope, useNavigationIndexHotkeys } from "#ui/selection-scopes.ts";
+import { useNavigationIndexHotkeys } from "#ui/selection-scopes.ts";
 import { useAppDispatch, useAppSelector, useAppStore } from "#ui/store.ts";
 import { type NavigationIndex } from "#ui/workspace/navigation-index.ts";
 import { prForgeUrl } from "#ui/pr.ts";
 import { stackBottomRelativeTo } from "#ui/api/stack.ts";
-import {
-	AbsorptionTarget,
-	BranchReference,
-	BottomUpdate,
-	InsertSide,
-	RelativeTo,
-	Segment,
-} from "@gitbutler/but-sdk";
+import { BranchReference, BottomUpdate, InsertSide, RelativeTo, Segment } from "@gitbutler/but-sdk";
 import { UseHotkeyDefinition, useHotkeys } from "@tanstack/react-hotkeys";
 import { useQuery } from "@tanstack/react-query";
 import { Match } from "effect";
@@ -145,23 +132,10 @@ export const useOutlineTreeHotkeys = ({
 		dispatch(projectSlice.actions.openDialog({ projectId, dialog: { _tag: "BranchPicker" } }));
 	};
 
-	const enterAbsorbMode = (source: Operand, sourceTarget: AbsorptionTarget) => {
-		dispatch(projectSlice.actions.enterAbsorbMode({ projectId, source, sourceTarget }));
-	};
-
 	const amendCommit = () => {
 		if (selection?._tag !== "Commit") return;
 
 		commitAmend({ commitId: selection.commitId });
-	};
-
-	const setCommitTarget = (relativeTo: RelativeTo) => {
-		dispatch(projectSlice.actions.setCommitTarget({ projectId, commitTarget: relativeTo }));
-	};
-
-	const composeCommitHere = (relativeTo: RelativeTo) => {
-		setCommitTarget(relativeTo);
-		focusCommitMessageInput();
 	};
 
 	const insertEmptyCommit = () => {
@@ -285,6 +259,7 @@ export const useOutlineTreeHotkeys = ({
 		const selectionAfterDiscard = selectAfterDiscardedCommit({
 			navigationIndex,
 			commit: { commitId: selection.commitId },
+			headInfoIndex,
 		});
 
 		commitDiscard(
@@ -295,13 +270,17 @@ export const useOutlineTreeHotkeys = ({
 			},
 			{
 				onSuccess: (response) => {
+					const newId =
+						selectionAfterDiscard?._tag === "Commit"
+							? response.workspace.replacedCommits[selectionAfterDiscard.commitId]
+							: undefined;
+					const latestSelectionAfterDiscard =
+						newId === undefined ? selectionAfterDiscard : commitOperand({ commitId: newId });
+
 					dispatch(
 						projectSlice.actions.selectOutline({
 							projectId,
-							selection: rewrittenCommitSelection({
-								selection: selectionAfterDiscard,
-								replacedCommits: response.workspace.replacedCommits,
-							}),
+							selection: latestSelectionAfterDiscard,
 						}),
 					);
 				},
@@ -370,7 +349,6 @@ export const useOutlineTreeHotkeys = ({
 	const defaultOutlineHotkeysEnabled = isDefaultMode;
 	const isSelectedCommit = selection?._tag === "Commit";
 	const isSelectedBranch = selection?._tag === "Branch";
-	const isSelectedChanges = selection?._tag === "UncommittedChanges";
 	const canPushSelectedBranch =
 		!!selectedPushContext &&
 		!isWorkspaceBranchAndAncestorsPushPending &&
@@ -397,8 +375,7 @@ export const useOutlineTreeHotkeys = ({
 			);
 			return checkedCommits.length > 0 ? checkedCommits : [operand];
 		},
-		selectSectionPredicate: (operand) =>
-			operand._tag === "Branch" || operand._tag === "UncommittedChanges",
+		selectSectionPredicate: (operand) => operand._tag === "Branch",
 	});
 
 	useHotkeys([
@@ -409,16 +386,6 @@ export const useOutlineTreeHotkeys = ({
 				conflictBehavior: "allow",
 				meta: outlineHotkeys.selectBranch.meta,
 			},
-		},
-		{
-			hotkey: outlineHotkeys.selectChanges.hotkey,
-			callback: () => {
-				dispatch(
-					projectSlice.actions.selectOutline({ projectId, selection: uncommittedChangesOperand }),
-				);
-				focusSelectionScope("outline");
-			},
-			options: { conflictBehavior: "allow" },
 		},
 		{
 			hotkey: outlineHotkeys.composeCommitMessage.hotkey,
@@ -457,17 +424,6 @@ export const useOutlineTreeHotkeys = ({
 							enabled: defaultOutlineHotkeysEnabled,
 							target: ref,
 							meta: outlineHotkeys.renameBranch.meta,
-						},
-					},
-				],
-				UncommittedChanges: (): Array<UseHotkeyDefinition> => [
-					{
-						hotkey: outlineHotkeys.composeCommitMessageFromChanges.hotkey,
-						callback: focusCommitMessageInput,
-						options: {
-							conflictBehavior: "allow",
-							enabled: defaultOutlineHotkeysEnabled,
-							target: ref,
 						},
 					},
 				],
@@ -627,39 +583,8 @@ export const useOutlineTreeHotkeys = ({
 									requireReset: true,
 								},
 							} satisfies UseHotkeyDefinition,
-							{
-								hotkey: outlineHotkeys.composeCommitHere.hotkey,
-								callback: () => composeCommitHere(relativeTo),
-								options: {
-									conflictBehavior: "allow",
-									enabled: defaultOutlineHotkeysEnabled,
-									target: ref,
-								},
-							} satisfies UseHotkeyDefinition,
-							{
-								hotkey: outlineHotkeys.setCommitTarget.hotkey,
-								callback: () => setCommitTarget(relativeTo),
-								options: {
-									conflictBehavior: "allow",
-									enabled: defaultOutlineHotkeysEnabled,
-									target: ref,
-									meta: outlineHotkeys.setCommitTarget.meta,
-								},
-							} satisfies UseHotkeyDefinition,
 						]
 					: [],
 		),
-		{
-			hotkey: outlineHotkeys.absorb.hotkey,
-			callback: () => {
-				enterAbsorbMode(uncommittedChangesOperand, { type: "all" });
-			},
-			options: {
-				conflictBehavior: "allow",
-				enabled: defaultOutlineHotkeysEnabled && isSelectedChanges,
-				target: ref,
-				meta: outlineHotkeys.absorb.meta,
-			},
-		},
 	]);
 };

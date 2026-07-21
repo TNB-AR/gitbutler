@@ -1,15 +1,19 @@
 import { Dialog } from "@base-ui/react";
-import type { FC } from "react";
+import { useDeferredValue, useState, type FC } from "react";
 import styles from "./Settings.module.css";
 import { useSuspenseQuery } from "@tanstack/react-query";
-import { getGUISettingsQueryOptions, listEditorsQueryOptions } from "#ui/api/queries.ts";
+import { guiSettingsQueryOptions, listEditorsQueryOptions } from "#ui/api/queries.ts";
 import { useSaveGUISettings } from "#ui/api/mutations.ts";
 import type { ThemeCollectionFilter } from "@pierre/theming";
 import { themes } from "@pierre/theming/themes";
 import type { ThemesType } from "@pierre/diffs/react";
 import { displayName } from "#ui/syntax-highlighting.ts";
 import { classes } from "#ui/components/classes.ts";
-import { defaultSettings } from "#ui/settings.ts";
+import { clampAutoFetch as clampAutofetch, defaultSettings } from "#ui/settings.ts";
+import * as ms from "ms";
+import { formatDuration } from "#ui/time.ts";
+import { ToggleGroup, Toggle } from "@base-ui/react";
+import { ToggleGroupStyles, ToggleStyles } from "#ui/components/ToggleGroup.tsx";
 
 const getRenderableThemes = (filter?: ThemeCollectionFilter) =>
 	themes
@@ -30,10 +34,10 @@ type Props = {
 
 export const Settings: FC<Props> = ({ open, onOpenChange }) => {
 	const { data: editors } = useSuspenseQuery(listEditorsQueryOptions);
-	const { data: settings } = useSuspenseQuery(getGUISettingsQueryOptions());
+	const { data: settings } = useSuspenseQuery(guiSettingsQueryOptions);
 	const { mutate: saveGUISettings } = useSaveGUISettings();
 
-	const setTheme = (variant: keyof ThemesType, themeName: string): void => {
+	const setSyntaxTheme = (variant: keyof ThemesType, themeName: string): void => {
 		saveGUISettings({
 			syntaxHighlighting: {
 				light: variant === "light" ? themeName : settings.syntaxHighlighting?.light,
@@ -44,6 +48,21 @@ export const Settings: FC<Props> = ({ open, onOpenChange }) => {
 
 	const lightThemes = getRenderableThemes({ colorScheme: "light" });
 	const darkThemes = getRenderableThemes({ colorScheme: "dark" });
+
+	const [autofetch, setAutofetch] = useState(
+		settings.autoFetchFrequency ?? defaultSettings.autoFetchFrequency,
+	);
+	const deferredAutofetch = useDeferredValue(autofetch);
+
+	// Throws on empty and large strings.
+	let parsedAutofetch: number;
+	try {
+		parsedAutofetch = ms.parse(deferredAutofetch);
+	} catch {
+		parsedAutofetch = Number.NaN;
+	}
+
+	const isValidAutofetch = !Number.isNaN(parsedAutofetch);
 
 	return (
 		<Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -59,6 +78,35 @@ export const Settings: FC<Props> = ({ open, onOpenChange }) => {
 						</h1>
 
 						<div className={classes("text-13", styles.inputs)}>
+							<div className={styles.input}>
+								<label htmlFor="autofetch" className={styles.label}>
+									Auto-fetch frequency
+									<div className={classes("text-12", styles.inferredValue)}>
+										{isValidAutofetch
+											? formatDuration(clampAutofetch(parsedAutofetch))
+											: "Disabled"}
+									</div>
+								</label>
+
+								<input
+									id="autofetch"
+									type="text"
+									value={autofetch}
+									onChange={(evt) => setAutofetch(evt.currentTarget.value)}
+									onBlur={(evt) =>
+										saveGUISettings({
+											autoFetchFrequency: evt.currentTarget.value,
+										})
+									}
+									onKeyDown={(evt) =>
+										(evt.key === "Enter" || evt.key === "Escape") &&
+										saveGUISettings({
+											autoFetchFrequency: evt.currentTarget.value,
+										})
+									}
+								/>
+							</div>
+
 							<div className={styles.input}>
 								<label htmlFor="editor" className={styles.label}>
 									Default editor
@@ -85,16 +133,42 @@ export const Settings: FC<Props> = ({ open, onOpenChange }) => {
 							</div>
 
 							<div className={styles.input}>
-								<label htmlFor="theme-light" className={styles.label}>
+								<label htmlFor="theme" className={styles.label}>
+									Theme
+								</label>
+
+								<ToggleGroup
+									aria-labelledby="theme"
+									value={[settings.theme ?? defaultSettings.theme]}
+									onValueChange={([theme]) => {
+										if (theme !== undefined) saveGUISettings({ theme });
+									}}
+									render={<ToggleGroupStyles />}
+									className={styles.unstretchedValue}
+								>
+									<Toggle render={<ToggleStyles />} value="system">
+										System
+									</Toggle>
+									<Toggle render={<ToggleStyles />} value="light">
+										Light
+									</Toggle>
+									<Toggle render={<ToggleStyles />} value="dark">
+										Dark
+									</Toggle>
+								</ToggleGroup>
+							</div>
+
+							<div className={styles.input}>
+								<label htmlFor="syntax-theme-light" className={styles.label}>
 									Syntax theme (light)
 								</label>
 
 								<select
-									id="theme-light"
+									id="syntax-theme-light"
 									value={
 										settings.syntaxHighlighting?.light ?? defaultSettings.syntaxHighlighting.light
 									}
-									onChange={(evt) => setTheme("light", evt.currentTarget.value)}
+									onChange={(evt) => setSyntaxTheme("light", evt.currentTarget.value)}
 								>
 									{lightThemes.map((theme) => (
 										<option key={theme.name} value={theme.name}>
@@ -105,16 +179,16 @@ export const Settings: FC<Props> = ({ open, onOpenChange }) => {
 							</div>
 
 							<div className={styles.input}>
-								<label htmlFor="theme-dark" className={styles.label}>
+								<label htmlFor="syntax-theme-dark" className={styles.label}>
 									Syntax theme (dark)
 								</label>
 
 								<select
-									id="theme-dark"
+									id="syntax-theme-dark"
 									value={
 										settings.syntaxHighlighting?.dark ?? defaultSettings.syntaxHighlighting.dark
 									}
-									onChange={(evt) => setTheme("dark", evt.currentTarget.value)}
+									onChange={(evt) => setSyntaxTheme("dark", evt.currentTarget.value)}
 								>
 									{darkThemes.map((theme) => (
 										<option key={theme.name} value={theme.name}>
@@ -139,7 +213,7 @@ export const Settings: FC<Props> = ({ open, onOpenChange }) => {
 										})
 									}
 									onKeyDown={(evt) =>
-										evt.key === "Escape" &&
+										(evt.key === "Enter" || evt.key === "Escape") &&
 										saveGUISettings({
 											diffFontFamily: evt.currentTarget.value,
 										})
@@ -164,7 +238,7 @@ export const Settings: FC<Props> = ({ open, onOpenChange }) => {
 										})
 									}
 									onKeyDown={(evt) =>
-										evt.key === "Escape" &&
+										(evt.key === "Enter" || evt.key === "Escape") &&
 										saveGUISettings({
 											diffFontSize: clamp(Number(evt.currentTarget.value), 1, 32),
 										})
@@ -189,7 +263,7 @@ export const Settings: FC<Props> = ({ open, onOpenChange }) => {
 										})
 									}
 									onKeyDown={(evt) =>
-										evt.key === "Escape" &&
+										(evt.key === "Enter" || evt.key === "Escape") &&
 										saveGUISettings({
 											diffTabSize: clamp(Number(evt.currentTarget.value), 1, 8),
 										})

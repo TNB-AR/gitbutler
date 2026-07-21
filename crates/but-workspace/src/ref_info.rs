@@ -536,11 +536,7 @@ pub fn graph_to_ref_info(
     let is_entrypoint = workspace.tip_is_entrypoint()?;
     let mut info = RefInfo {
         workspace_ref_info: workspace_ref_info.cloned(),
-        symbolic_remote_names: repo
-            .remote_names()
-            .into_iter()
-            .map(|n| n.into_owned().into())
-            .collect(),
+        symbolic_remote_names: repo.remote_names().into_iter().collect(),
         stacks: stacks
             .iter()
             .map(|stack| branch::Stack::try_from_graph_stack(stack, repo))

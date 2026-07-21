@@ -141,10 +141,7 @@ pub(crate) struct RefAnonymizer {
 impl RefAnonymizer {
     pub(crate) fn new(remotes: &gix::remote::Names) -> Self {
         RefAnonymizer {
-            remotes: remotes
-                .iter()
-                .map(|r| r.as_ref().as_bstr().to_owned())
-                .collect(),
+            remotes: remotes.iter().cloned().collect(),
             remote_mapping: BTreeMap::new(),
             name_mapping: BTreeMap::new(),
         }

@@ -107,6 +107,10 @@ export const workspaceHotkeys = {
 		hotkey: "Mod+N",
 		meta: { group: "Workspace", name: "Add new branch" },
 	},
+	fetchFromRemotes: {
+		hotkey: "Alt+Shift+F",
+		meta: { group: "Workspace", name: "Fetch" },
+	},
 	updateWorkspace: {
 		hotkey: "Alt+Shift+R",
 		meta: {
@@ -114,11 +118,17 @@ export const workspaceHotkeys = {
 			name: "Update workspace (rebases all stacks)",
 		},
 	},
-	focusPreviousSelectionScope: {
+	focusHorizontalSelectionScopeLeft: {
 		hotkey: "Mod+Alt+ArrowLeft",
 	},
-	focusNextSelectionScope: {
+	focusHorizontalSelectionScopeRight: {
 		hotkey: "Mod+Alt+ArrowRight",
+	},
+	focusVerticalSelectionScopeUp: {
+		hotkey: "Mod+Alt+ArrowUp",
+	},
+	focusVerticalSelectionScopeDown: {
+		hotkey: "Mod+Alt+ArrowDown",
 	},
 	settings: {
 		hotkey: "Mod+,",
@@ -135,16 +145,9 @@ export const workspaceHotkeys = {
 } satisfies Record<string, HotkeyWithMeta>;
 
 export const outlineHotkeys = {
-	absorb: {
-		hotkey: "A",
-		meta: { group: "Uncommitted changes", name: "Absorb" },
-	},
 	amendCommit: {
 		hotkey: "Shift+A",
 		meta: { group: "Commit", name: "Amend commit" },
-	},
-	composeCommitHere: {
-		hotkey: "C",
 	},
 	checkCommit: {
 		hotkey: "Space",
@@ -173,19 +176,12 @@ export const outlineHotkeys = {
 		hotkey: "O",
 		meta: { group: "Branch", name: "Open pull request in browser" },
 	},
-	setCommitTarget: {
-		hotkey: "Shift+C",
-		meta: { group: "Commit", name: "Set commit target" },
-	},
 	composeCommitMessage: {
 		hotkey: "Shift+Z",
 	},
 	deleteCommit: {
 		hotkey: globalThis.window.lite.platform === "darwin" ? "Mod+Backspace" : "Delete",
 		meta: { group: "Commit", name: "Delete commit" },
-	},
-	composeCommitMessageFromChanges: {
-		hotkey: "R",
 	},
 	moveCommitDown: {
 		hotkey: "Alt+ArrowDown",
@@ -214,9 +210,6 @@ export const outlineHotkeys = {
 	selectBranch: {
 		hotkey: "T",
 		meta: { group: "Workspace", name: "Jump to branch" },
-	},
-	selectChanges: {
-		hotkey: "Z",
 	},
 } satisfies Record<string, HotkeyWithMeta>;
 

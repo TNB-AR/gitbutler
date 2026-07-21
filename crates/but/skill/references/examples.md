@@ -70,9 +70,9 @@ but pr new bv -t
 
 **Result:** Two PRs where user-profile targets add-authentication, with GitButler stack information in the PR descriptions.
 
-## Example 3: Using Absorb Instead of New Commits
+## Example 3: Amending Fixes Into Existing Commits
 
-**Scenario:** Made a small typo fix that should be part of the last commit, not a new commit.
+**Scenario:** Made a small typo fix that should be part of an existing commit, not a new commit.
 
 ```bash
 # 1. Check current commits and uncommitted changes
@@ -86,25 +86,14 @@ but status -fv
 # Uncommitted:
 #   a1: fix-typo.js
 
-# 2. Preview what absorb would do (recommended first step)
-but absorb a1 --dry-run    # Shows where a1 would be absorbed
+# 2. Decide which commit the fix belongs to
+# (the typo is in code introduced by nn, so it belongs in nn)
 
-# 3. Absorb the specific file into appropriate commit
-but absorb a1    # Absorb just this file + get updated status
-
-# GitButler analyzes the change and amends it into nn
-# (because the typo is in code from nn)
+# 3. Amend the file into that commit
+but amend nn --changes a1    # Amend just this file + get updated status
 ```
 
-**Targeted vs blanket absorb:**
-
-```bash
-but absorb a1    # Absorb specific file (recommended)
-but absorb bu    # Absorb all changes assigned to branch bu
-but absorb       # Absorb ALL uncommitted changes (use with caution)
-```
-
-**Why absorb?** Keeps history clean. Small fixes belong in the commits they fix, not as separate "fix typo" commits.
+**Why amend?** Keeps history clean. Small fixes belong in the commits they fix, not as separate "fix typo" commits. You know what you changed and why — pick the target commit yourself.
 
 ## Example 4: Reorganizing Commit History
 
@@ -202,42 +191,35 @@ but commit bv -m "Add dialog component" --changes <id> # To frontend
 but pull
 
 # Output:
-# Conflict in commit nn on branch feature-x
+# Summary
+# ────────
+#   feature-x - conflicted
+#       nn Add validation
 
-# 2. Check status
-but status -fv
-
-# Output:
-# Branch: feature-x (bu)
-#   nn: Add validation (CONFLICTED)
-
-# 3. Enter resolution mode
+# 2. Enter resolution mode using the commit ID from the pull output
 but resolve nn
 
 # Output:
-# Entering resolution mode for commit nn
-# Fix conflicts in: api/users.js, api/validation.js
+# Checking out conflicted commit nn
+# Conflicted files remaining:
+#   ✗ api/users.js
+#      12│<<<<<<< New base: ...
+#      ...conflict regions with line numbers...
 
-# 4. Read each conflicted file and edit to resolve
+# 3. Edit each conflicted file to resolve
 # IMPORTANT: You MUST edit the files — do NOT just run `but resolve finish`
 # NEVER use `git add`, `git checkout --theirs/--ours`, or any git write command — just edit the files directly with the Edit tool, then `but resolve finish`
-cat api/users.js           # Read to see conflict markers
-# (edit to remove <<<<<<< ======= >>>>>>> markers and keep correct content)
+# (edit to remove <<<<<<< ======= >>>>>>> markers and keep correct content;
+#  with several conflicted files, `but resolve status` re-lists what remains)
 
-# 5. Check progress
-but resolve status
-
-# Output:
-# Remaining conflicts:
-#   api/validation.js
-
-# 6. Continue fixing...
-# (resolve last conflict)
-
-# 7. Finalize
+# 4. Finalize
 but resolve finish
 
-# Back to normal workspace mode
+# Output:
+# ✓ Conflict resolution finalized successfully!
+# No conflict markers remain in the resolved files.
+# Workspace restored; uncommitted changes intact: ...
+# No follow-up status or marker scan needed — finish already reports both.
 ```
 
 ## Example 7: Complete Feature Development Workflow
@@ -267,7 +249,7 @@ but commit bu -m "Style dashboard components" --changes <file-ids>
 
 # 7. Make small fix
 # (fix typo in widget)
-but absorb a1    # Absorb specific file into appropriate commit
+but amend <commit-id> --changes a1    # Amend fix into the commit it belongs to
 
 # 8. Clean up if needed
 but squash bu    # Combine all commits (optional)
@@ -373,7 +355,7 @@ but commit bu -m "Identify auth bug source" --changes <file-ids>
 # (make more changes)
 but commit bu -m "Fix token expiration handling" --changes <file-ids>
 # (small fix to existing code)
-but absorb a1              # Absorb specific fix into appropriate commit
+but amend <commit-id> --changes a1  # Amend fix into the commit it belongs to
 
 # Mid-day: Start urgent fix on different branch
 but branch new hotfix-login  # Parallel branch for urgent work
@@ -391,9 +373,7 @@ but pr new bu      # Push and create PR
 
 # After PR review: Make requested changes
 # (make changes based on feedback)
-but absorb <file-id>    # Absorb specific changes into commits
-# Or absorb all changes for this branch:
-but absorb bu          # Absorb all changes assigned to bu
+but amend <commit-id> --changes <file-id>  # Amend each fix into the commit it belongs to
 but push fix-auth-bug   # Push updated history
 ```
 
@@ -453,7 +433,6 @@ but status -fv    # File-centric view for quick overview
 ### Preview Before Doing
 
 ```bash
-but absorb <file-id> --dry-run  # See where specific file would be absorbed
 but push my-feature --dry-run   # See what would be pushed
 ```
 
@@ -471,8 +450,8 @@ but commit my-branch -m "Add parser" --changes qs:5,qs:2 \
 ```
 
 The commits stack in the order you write them, so `Add parser` ends up below (older
-than) `Add tests`. Only chain when each command references uncommitted IDs (plus the
-stable branch ID). If an ID stops resolving, re-read the diff and continue.
+than) `Add tests`. Chain these commit commands when each references uncommitted IDs
+(plus the stable branch ID). If an ID stops resolving, re-read the diff and continue.
 History edits — `amend`, `squash`, `move`, `uncommit`, `reword` — may also run in
 sequence off one status read when every commit ref involved is a change-ID ref;
 those stay stable across the edits. Run them one at a time when a ref is sha-based

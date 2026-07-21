@@ -4,7 +4,7 @@ pub struct Outcome {
     /// desired branch and nothing had to be unapplied — the caller's workspace remains
     /// current then (note that metadata changes might not be included in that case, as they
     /// aren't the source of truth). Display callers materialize the pruned shape via
-    /// [`into_display`](but_graph::Workspace::into_display) (or
+    /// [`display_stacks`](but_graph::Workspace::display_stacks) (or
     /// [`Self::display_workspace`]).
     pub workspace: Option<but_graph::Workspace>,
     /// The unapply operation ended by checking out this ref.
@@ -245,13 +245,10 @@ pub(crate) mod function {
             // The branch exists in Git, but does not in the workspace: Nothing to do.
             return Ok(Outcome::new(None));
         }
-        let branch_stack_was_entrypoint = {
-            let answer = ws
-                .segment_graph
-                .segment_location_by_name(branch)
-                .is_some_and(|(stack_idx, _)| ws.entry_marks_stack(stack_idx));
-            answer
-        };
+        let branch_stack_was_entrypoint = ws
+            .segment_graph
+            .segment_location_by_name(branch)
+            .is_some_and(|(stack_idx, _)| ws.entry_marks_stack(stack_idx));
         let workspace_tip_was_entrypoint = ws.is_entrypoint();
 
         let Some(workspace_ref_name) = workspace_ref_name else {

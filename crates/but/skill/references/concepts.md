@@ -164,7 +164,7 @@ The uncommitted change **depends on** C1 (because it calls `foo()`).
 **Implications:**
 
 1. Can't commit this change to a stack that doesn't contain C1
-2. `but absorb` will automatically amend it into C1 (or a commit after C1)
+2. When amending it into history, it belongs in C1 (or a commit after C1)
 3. If you try to move the change, GitButler prevents invalid operations
 
 ### Why This Matters
@@ -261,11 +261,10 @@ When `but pull` causes conflicts, affected commits are marked as conflicted.
 
 ### Resolution Workflow
 
-1. **Identify:** `but status` shows conflicted commits
-2. **Enter mode:** `but resolve <commit-id>`
-3. **Fix conflicts:** Edit files, remove conflict markers
-4. **Check:** `but resolve status` shows remaining conflicts
-5. **Finalize:** `but resolve finish` or `but resolve cancel`
+1. **Identify:** the `but pull` summary lists each conflicted commit's ID, oldest first (`but status` also shows them)
+2. **Enter mode:** `but resolve <commit-id>` — it prints the conflict regions with line numbers. With several conflicted commits, resolve the oldest first: finishing a lower commit rebases the ones above it
+3. **Fix conflicts:** Edit files, remove conflict markers (`but resolve status` re-lists what remains when several files are conflicted)
+4. **Finalize:** `but resolve finish` or `but resolve cancel` — finish reports leftover markers and the surviving uncommitted changes, so no follow-up check is needed
 
 ### During Resolution
 

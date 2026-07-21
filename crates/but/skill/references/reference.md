@@ -6,7 +6,7 @@ Agent-focused reference for useful `but` commands.
 
 - [Inspection](#inspection-understanding-state) - `status`, `show`, `diff`
 - [Branching](#branching) - `branch new`, `apply`, `unapply`, `branch delete`, `pick`
-- [Committing](#committing) - `commit`, `absorb`
+- [Committing](#committing) - `commit`
 - [Editing History](#editing-history) - `rub`, `squash`, `amend`, `move`, `uncommit`, `reword`, `discard`
 - [Conflict Resolution](#conflict-resolution) - `resolve`
 - [Remote Operations](#remote-operations) - `push`, `pull`, `pr`, `land`
@@ -198,26 +198,6 @@ Edge case: if wanted and unwanted edits are in the same hunk, GitButler cannot s
 
 If only one branch is applied, you can omit the branch ID.
 
-### `but absorb [source]`
-
-Automatically amend uncommitted changes into existing commits.
-
-```bash
-but absorb <file-id>          # Absorb specific file (recommended)
-but absorb <branch-id>        # Absorb all changes assigned to this branch
-but absorb                    # Absorb ALL uncommitted changes (use with caution)
-but absorb --dry-run          # Preview without making changes
-but absorb <file-id> --dry-run  # Preview specific file absorption
-```
-
-**Recommendation:** Prefer targeted absorb (`but absorb <file-id>`) over absorbing everything. Running `but absorb` without arguments absorbs ALL uncommitted changes across all branches, which may not be what you want.
-
-Logic:
-
-- Changes amended into topmost commit of their branch
-- Changes depending on specific commit amended into that commit
-- Uses smart matching to find appropriate commits
-
 ## Editing History
 
 ### `but rub <source> <dest>`
@@ -266,9 +246,7 @@ Amend one or more files/hunks into a specific commit. Use when you know exactly 
 but amend <commit-id> --changes <file-id>,<hunk-id>
 ```
 
-**When to use `amend` vs `absorb`:**
-- `but amend` - You know the target commit; explicit control
-- `but absorb` - Let GitButler auto-detect the target; smart matching based on dependencies
+Decide the target commit yourself: check `but status -fv`, find the commit the change logically belongs to, then amend into it.
 
 Convenience wrapper around `rub` for amending uncommitted files or hunks into a known commit.
 
@@ -325,7 +303,7 @@ but discard <hunk-id>         # Discard hunk changes
 
 ## Conflict Resolution
 
-When commits have conflicts (shown in `but status` — look for commits marked as conflicted):
+When commits have conflicts (the `but pull` summary lists them; `but status` marks them as conflicted):
 
 ### `but resolve <commit>`
 
@@ -362,12 +340,10 @@ but resolve cancel --force
 
 **Workflow:**
 
-1. `but status` — identify conflicted commits (marked as conflicted in the output)
-2. `but resolve <commit-id>` — enter resolution mode for the conflicted commit
-3. Edit the conflicted files — remove `<<<<<<<`, `=======`, `>>>>>>>` markers and keep the correct content
-4. `but resolve status` — verify no conflicts remain
-5. `but resolve finish` — finalize and return to normal mode
-6. If multiple commits are conflicted, repeat steps 2-5 for each one
+1. `but resolve <commit-id>` — enter resolution mode using the commit ID from the `but pull` summary (or `but status`); the conflict regions are printed with line numbers
+2. Edit the conflicted files — remove `<<<<<<<`, `=======`, `>>>>>>>` markers and keep the correct content (`but resolve status` re-lists what remains when several files are conflicted)
+3. `but resolve finish` — finalize and return to normal mode; the output reports leftover markers and the surviving uncommitted changes, so no follow-up status is needed
+4. If multiple commits are conflicted, repeat steps 1-3 for each one, oldest commit first — finishing a lower commit rebases the ones above it
 
 **Important:** Never use `git add`, `git commit`, or other git write commands during conflict resolution. Only use `but resolve` commands and edit files directly.
 
@@ -393,11 +369,12 @@ Use this for "get latest from main" in a GitButler workspace.
 
 ```bash
 but pull                      # Fetch and rebase applied branches
-but pull --check              # Check if can merge cleanly (no changes)
+but pull --check              # Dry-run preview: report what would happen, change nothing
 ```
 
-Run `but pull --check` first, then `but pull` if clean. Do not use raw
-`git pull` or `git rebase`.
+Run `but pull` directly; its output reports the result and `but undo`
+reverts it. Use `--check` only when you want a preview without updating.
+Do not use raw `git pull` or `git rebase`.
 
 ### `but pr`
 
@@ -501,7 +478,11 @@ but setup
 but setup --init              # Also initialize a new git repo if none exists
 ```
 
-Converts regular git repo to use GitButler workspace model. Use `--init` in non-interactive environments (CI/CD) to ensure a git repository exists before setup.
+Converts a regular Git repository to the managed GitButler workspace model. Use `--init` in
+non-interactive environments (CI/CD) to ensure a Git repository exists before setup. When the
+experimental single-branch feature is enabled, normal CLI use does not require this command: the
+repository is registered and its target is inferred lazily without checking out
+`gitbutler/workspace` or installing setup hooks.
 
 ### `but teardown`
 
@@ -517,12 +498,15 @@ View and manage GitButler configuration.
 
 ```bash
 but config
-but config user               # Also: forge, target, metrics, ui, ai
+but config user               # Also: forge, target, metrics, feature, ui, ai
 but config ai openai          # Also: anthropic, ollama, lmstudio, openrouter
 but config target             # Show the current target branch
 but config target origin/main # Set the fetch target
 but config push-remote         # Show the current push remote
 but config push-remote origin  # Set the push remote without changing the target
+but config feature                         # List configurable feature flags
+but config feature single-branch           # Show a feature flag's value
+but config feature single-branch enable    # Also: disable
 ```
 
 ### `but update check`

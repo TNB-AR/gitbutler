@@ -21,6 +21,8 @@ use crate::{
     },
 };
 
+const CLEAR_TO_END_OF_LINE: &str = "\x1b[0K";
+
 #[derive(Debug)]
 pub struct DiffOutcome<'a> {
     ctx: &'a mut Context,
@@ -49,9 +51,10 @@ impl CliOutputHuman for DiffOutcome<'_> {
             DiffOperation::Uncommitted => {
                 diff_rendering::render_uncommitted(ctx, theme, &mut id_gen, options, &mut writer)?;
             }
-            DiffOperation::Commit { commit } => {
+            DiffOperation::Commit { commit, change_id } => {
                 diff_rendering::render_commit(
                     commit,
+                    change_id,
                     ctx,
                     theme,
                     &mut id_gen,
@@ -147,6 +150,9 @@ impl DiffLineWriter for DiffWriter<'_> {
                     let rendered = line_style.patch(span.style).paint(&span.content);
                     write!(self.out, "{rendered}")?;
                 }
+                if line_style.bg.is_some() && colored::control::SHOULD_COLORIZE.should_colorize() {
+                    write!(self.out, "{}", line_style.paint(CLEAR_TO_END_OF_LINE))?;
+                }
                 writeln!(self.out)?;
             }
             DetailsLine::SectionSeparator => {
@@ -201,7 +207,9 @@ fn resolve(ctx: &Context, id_map: &IdMap, args: Platform) -> CliResult<DiffOpera
 
     match resolved_target {
         ResolvedCliIdArg::Uncommitted => Ok(DiffOperation::Uncommitted),
-        ResolvedCliIdArg::Commit(commit) => Ok(DiffOperation::Commit { commit }),
+        ResolvedCliIdArg::Commit(commit, change_id) => {
+            Ok(DiffOperation::Commit { commit, change_id })
+        }
         ResolvedCliIdArg::Branch(branch) => {
             let branch = branch.resolve_local_branch_name()?;
             Ok(DiffOperation::Branch { branch })
@@ -237,6 +245,7 @@ enum DiffOperation {
     Uncommitted,
     Commit {
         commit: ObjectId,
+        change_id: Option<but_core::ChangeId>,
     },
     Branch {
         branch: FullName,

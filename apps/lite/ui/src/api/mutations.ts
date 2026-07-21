@@ -5,7 +5,7 @@ import {
 	getReviewMergeStatusQueryOptions,
 	getReviewQueryOptions,
 	headInfoQueryOptions,
-	getGUISettingsQueryOptions,
+	guiSettingsQueryOptions,
 	type QueryKey,
 } from "#ui/api/queries.ts";
 import { shortCommitId } from "#ui/commit.ts";
@@ -18,6 +18,7 @@ import {
 import { commitOperand, type BranchOperand } from "#ui/operands.ts";
 import { projectSlice } from "#ui/projects/state.ts";
 import { type AppDispatch, useAppDispatch } from "#ui/store.ts";
+import { formatRelativeTime } from "#ui/time.ts";
 import { Toast } from "@base-ui/react";
 import {
 	type CommitAbsorption,
@@ -416,9 +417,9 @@ export const useCommitCreate = ({ projectId }: { projectId: string }) => {
 
 			if (input.relativeTo.type === "commit" && response.newCommit !== null) {
 				dispatch(
-					projectSlice.actions.setCommitTarget({
+					projectSlice.actions.selectOutline({
 						projectId,
-						commitTarget: { type: "commit", subject: response.newCommit },
+						selection: commitOperand({ commitId: response.newCommit }),
 					}),
 				);
 			}
@@ -738,16 +739,12 @@ export const useRestoreSnapshot = ({ projectId }: { projectId: string }) => {
 			// TODO: We should map this to something user-friendly.
 			const op = snapshot.details?.operation;
 
-			// TODO: We should use dynamic units.
-			const minsAgo = new Intl.RelativeTimeFormat(undefined, { style: "short" }).format(
-				Math.ceil((snapshot.createdAt - Date.now()) / 1000 / 60),
-				"minutes",
-			);
+			const relativeTime = formatRelativeTime(snapshot.createdAt);
 
 			toastManager.add({
 				type: "info",
 				title,
-				description: `Restored to ${shortCommitId(snapshot.commitId)} (${op !== undefined ? `${op}, ` : ""}${minsAgo})`,
+				description: `Restored to ${shortCommitId(snapshot.commitId)} (${op !== undefined ? `${op}, ` : ""}${relativeTime})`,
 			});
 		},
 		onError: (error, direction) => {
@@ -876,10 +873,10 @@ export const useSaveGUISettings = () => {
 	const toastManager = Toast.useToastManager();
 
 	return useMutation({
-		scope: { id: "gui-settings" },
+		scope: { id: "guiSettings" },
 		mutationFn: async (cfg: Partial<GUISettings>, ctx) => {
 			// In practice we should always have some cached data at this point.
-			const prev = await ctx.client.ensureQueryData(getGUISettingsQueryOptions());
+			const prev = await ctx.client.ensureQueryData(guiSettingsQueryOptions);
 			const next: GUISettings = {
 				...prev,
 				...cfg,
@@ -887,7 +884,7 @@ export const useSaveGUISettings = () => {
 
 			// Update the cache immediately for UX, and keep it updated even if writing fails so that the
 			// app is usable. We shan't bother invalidating the query.
-			ctx.client.setQueryData(getGUISettingsQueryOptions().queryKey, next);
+			ctx.client.setQueryData(guiSettingsQueryOptions.queryKey, next);
 
 			return await window.lite.writeGUISettings(next);
 		},

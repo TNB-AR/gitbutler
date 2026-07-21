@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::graph_rebase::graph_editor::{PickIndex, RefIndex};
+use crate::graph_rebase::graph_editor::RefIndex;
 use crate::graph_rebase::positions;
 use anyhow::Result;
 use but_core::{

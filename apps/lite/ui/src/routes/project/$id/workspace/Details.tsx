@@ -15,7 +15,7 @@ import {
 	changesInWorktreeQueryOptions,
 	commitDetailsWithLineStatsQueryOptions,
 	forgeInfoOptions,
-	getGUISettingsQueryOptions,
+	guiSettingsQueryOptions,
 	getReviewMergeStatusQueryOptions,
 	headInfoQueryOptions,
 	listCIChecksQueryOptions,
@@ -27,7 +27,6 @@ import { decodeBytes } from "#ui/api/bytes.ts";
 import { commitBody, commitTitle, shortCommitId } from "#ui/commit.ts";
 import {
 	branchFileParent,
-	uncommittedChangesFileParent,
 	commitFileParent,
 	FileOperand,
 	fileOperand,
@@ -113,6 +112,7 @@ import { AggregateCIChecks } from "#ui/ci.ts";
 import { IconName } from "#ui/components/iconNames.ts";
 import { draftPRQueryOptions, usePersistDraftPR } from "#ui/pr.ts";
 import { combineHashes, hash } from "#ui/hash.ts";
+import { assert } from "#ui/assert.ts";
 
 type BranchTab = "diff" | "pr";
 
@@ -191,8 +191,8 @@ const mkCodeViewItem = (
 		type: "diff",
 		id: codeViewItemId({ changesetKey, path: change.path }),
 		version,
-		// oxlint-disable-next-line typescript/no-non-null-assertion -- There should always be exactly one result given our one parsed hunk.
-		fileDiff: parsed[0]!.files[0]!,
+		// There should always be exactly one result given our one parsed hunk.
+		fileDiff: assert(assert(parsed[0]).files[0]),
 	};
 };
 
@@ -340,20 +340,24 @@ const DiffContents: FC<{
 	const dispatch = useAppDispatch();
 	const { data: editors } = useQuery(listEditorsQueryOptions);
 	const { data: preferredEditor } = useQuery({
-		...getGUISettingsQueryOptions(),
+		...guiSettingsQueryOptions,
 		select: (cfg) => editors?.find((editor) => editor.id === cfg.editorId),
 	});
 	const { data: preferredFontFamily } = useQuery({
-		...getGUISettingsQueryOptions(),
+		...guiSettingsQueryOptions,
 		select: (cfg) => cfg.diffFontFamily,
 	});
 	const { data: preferredFontSize } = useQuery({
-		...getGUISettingsQueryOptions(),
+		...guiSettingsQueryOptions,
 		select: (cfg) => cfg.diffFontSize,
 	});
 	const { data: preferredTabSize } = useQuery({
-		...getGUISettingsQueryOptions(),
+		...guiSettingsQueryOptions,
 		select: (cfg) => cfg.diffTabSize,
+	});
+	const { data: theme } = useQuery({
+		...guiSettingsQueryOptions,
+		select: (cfg) => cfg.theme,
 	});
 	const { mutate: openInEditor } = useOpenInEditor();
 
@@ -388,8 +392,7 @@ const DiffContents: FC<{
 		selection: diffSelection,
 		selectSectionPredicate: (hunk) => {
 			const k = hunkOperandIdentityKey(hunk);
-			// oxlint-disable-next-line typescript/no-non-null-assertion -- Absurd.
-			return hunkOperandIdentityKey(fileByHunkKey.get(k)!.hunks[0]!.operand) === k;
+			return hunkOperandIdentityKey(assert(assert(fileByHunkKey.get(k)).hunks[0]).operand) === k;
 		},
 		ref: selectionScopeRef,
 		getKey: hunkOperandIdentityKey,
@@ -445,8 +448,8 @@ const DiffContents: FC<{
 
 		const activeItem = viewer
 			.getRenderedItems()
-			// oxlint-disable-next-line typescript/no-non-null-assertion -- It can only be undefined if the item ID is invalid.
-			.findLast((item) => viewer.getTopForItem(item.id)! <= scrollTop);
+			// It can only be undefined if the item ID is invalid.
+			.findLast((item) => assert(viewer.getTopForItem(item.id)) <= scrollTop);
 
 		// This can happen on very fast scroll.
 		if (activeItem === undefined) return;
@@ -502,8 +505,8 @@ const DiffContents: FC<{
 	const enhanceCollapsed = (item: CodeViewDiffItem): CodeViewDiffItem => ({
 		...item,
 		collapsed: true,
-		// oxlint-disable-next-line typescript/no-non-null-assertion -- We always use versions.
-		version: combineHashes(item.version!, 1),
+		// We always use versions.
+		version: combineHashes(assert(item.version), 1),
 	});
 
 	return items.length === 0 ? (
@@ -544,7 +547,7 @@ const DiffContents: FC<{
 				diffStyle: diffStyle ?? diffDefaults.diffStyle,
 				disableBackground: !(diffBackgrounds ?? diffDefaults.diffBackground),
 				overflow: diffOverflow ?? diffDefaults.diffOverflow,
-				themeType: "system",
+				themeType: theme ?? defaultSettings.theme,
 				stickyHeaders: true,
 				enableLineSelection: true,
 				layout: {
@@ -708,12 +711,6 @@ const Title: FC<{
 					)}
 				</SuspenseQuery>
 			),
-			UncommittedChanges: () => (
-				<div className={styles.title}>
-					<Icon name="file-diff" />
-					<h3 className={classes("text-15", "text-semibold")}>Uncommitted changes</h3>
-				</div>
-			),
 			File: ({ path }) => (
 				<div className={styles.title}>
 					<Icon name="file" />
@@ -803,7 +800,7 @@ const DiffOverflowToggle: FC<
 	Omit<ComponentProps<typeof Toggle>, "aria-label" | "pressed" | "onPressedChange">
 > = (toggleProps) => {
 	const { data: diffOverflow } = useQuery({
-		...getGUISettingsQueryOptions(),
+		...guiSettingsQueryOptions,
 		select: (cfg) => cfg.diffOverflow,
 	});
 	const { mutate: saveGUISettings } = useSaveGUISettings();
@@ -835,7 +832,7 @@ const DiffBackgroundsToggle: FC<
 	Omit<ComponentProps<typeof Toggle>, "aria-label" | "pressed" | "onPressedChange">
 > = (toggleProps) => {
 	const { data: diffBackgrounds } = useQuery({
-		...getGUISettingsQueryOptions(),
+		...guiSettingsQueryOptions,
 		select: (cfg) => cfg.diffBackground,
 	});
 	const { mutate: saveGUISettings } = useSaveGUISettings();
@@ -868,7 +865,7 @@ const DiffStyleToggleGroup: FC<
 	>
 > = (toggleGroupProps) => {
 	const { data: diffStyle } = useQuery({
-		...getGUISettingsQueryOptions(),
+		...guiSettingsQueryOptions,
 		select: (cfg) => cfg.diffStyle,
 	});
 	const { mutate: saveGUISettings } = useSaveGUISettings();
@@ -969,6 +966,9 @@ const Diff: FC<{
 	const didScrollToViaFileRef = useRef(false);
 
 	const dispatch = useAppDispatch();
+	const canShowFiles = useAppSelector((state) =>
+		projectSlice.selectors.selectCanShowFiles(state, projectId),
+	);
 	const files = filesItems.map((item) => item.path);
 	const filesNavigationIndex: NavigationIndex<string> = {
 		items: files,
@@ -981,7 +981,6 @@ const Diff: FC<{
 	const changesetKey = Match.value(outlineSelection).pipe(
 		Match.tags({
 			Branch: ({ branchRef }) => decodeBytes(branchRef),
-			UncommittedChanges: () => "uncommittedChanges",
 			File: ({ path }) => path,
 			Commit: ({ commitId }) => commitId,
 		}),
@@ -990,7 +989,6 @@ const Diff: FC<{
 	const fileParent = Match.value(outlineSelection).pipe(
 		Match.tags({
 			Branch: ({ branchRef }) => branchFileParent({ branchRef }),
-			UncommittedChanges: () => uncommittedChangesFileParent,
 			File: ({ parent }) => parent,
 			Commit: ({ commitId }) => commitFileParent({ commitId }),
 		}),
@@ -1027,7 +1025,7 @@ const Diff: FC<{
 	};
 
 	const { data: diffSettings } = useQuery({
-		...getGUISettingsQueryOptions(),
+		...guiSettingsQueryOptions,
 		select: (cfg) => ({
 			diffBackground: cfg.diffBackground,
 			diffOverflow: cfg.diffOverflow,
@@ -1082,7 +1080,7 @@ const Diff: FC<{
 	return (
 		<div className={styles.diffTab}>
 			<div className={styles.actions}>
-				<FilesToggle className={getButtonClassName({})}>Toggle files</FilesToggle>
+				{canShowFiles && <FilesToggle className={getButtonClassName({})}>Toggle files</FilesToggle>}
 
 				<Toolbar.Root aria-label="Diff controls" className={styles.diffControls}>
 					<ToggleGroupStyles>
@@ -1504,9 +1502,13 @@ export const Details: FC<
 	const detailsFullWindow = useAppSelector((state) =>
 		projectSlice.selectors.selectDetailsFullWindow(state, projectId),
 	);
-	const filesVisible = useAppSelector((state) =>
+	const filesVisibleState = useAppSelector((state) =>
 		projectSlice.selectors.selectFilesVisible(state, projectId),
 	);
+	const canShowFiles = useAppSelector((state) =>
+		projectSlice.selectors.selectCanShowFiles(state, projectId),
+	);
+	const filesVisible = canShowFiles && filesVisibleState;
 	const [commitBodyCollapsed, setCommitBodyCollapsed] = useState(true);
 	const [branchTab, setBranchTab] = useState<BranchTab>("diff");
 	const commitBodyId = useId();
@@ -1625,16 +1627,6 @@ export const Details: FC<
 										renderDiff({
 											changes: commitDetails.changes,
 											filesItems: getCommitFileRowItems({ commitDetails }),
-										})
-									}
-								</SuspenseQuery>
-							),
-							UncommittedChanges: () => (
-								<SuspenseQuery {...changesInWorktreeQueryOptions(projectId)}>
-									{({ data: worktreeChanges }) =>
-										renderDiff({
-											changes: worktreeChanges.changes,
-											filesItems: getChangesFileRowItems(worktreeChanges),
 										})
 									}
 								</SuspenseQuery>

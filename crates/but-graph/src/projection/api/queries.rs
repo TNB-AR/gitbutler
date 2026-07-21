@@ -73,7 +73,7 @@ impl Workspace {
         &self,
         commit_id: gix::ObjectId,
     ) -> Option<(&gix::refs::FullNameRef, bool)> {
-        let answer = {
+        {
             let (stack_idx, seg_idx) = self.segment_containing(commit_id)?;
             let stack = &self.segment_graph.stacks[stack_idx];
             let named_metadata = |i: usize| {
@@ -90,8 +90,7 @@ impl Workspace {
                     (seg_idx + 1..stack.segments.len())
                         .find_map(|i| named_metadata(i).map(|rn| (rn, false)))
                 })
-        };
-        answer
+        }
     }
 
     /// The `(stack_idx, segment_idx)` of the segment-graph segment owning `commit_id`: a
@@ -133,10 +132,10 @@ impl Workspace {
     /// are separated only by metadata (a graph walk sees one group), and an at-bound
     /// stack exists only through the reconciliation's surfacing passes.
     pub fn is_stack_tip(&self, name: &gix::refs::FullNameRef) -> bool {
-        let answer = self.segment_graph.stacks.iter().any(|stack| {
-            stack.segments.iter().find_map(|segment| segment.ref_name()) == Some(name)
-        });
-        answer
+        self.segment_graph
+            .stacks
+            .iter()
+            .any(|stack| stack.segments.iter().find_map(|segment| segment.ref_name()) == Some(name))
     }
 
     /// Return the full [`RefInfo`](crate::RefInfo) of the workspace tip segment, if the tip

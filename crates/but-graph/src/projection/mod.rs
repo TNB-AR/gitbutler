@@ -547,10 +547,9 @@ pub fn find_segment_owner_indexes_by_refname(
 }
 
 /// The reconciled stack partition, reduced to what operations consume: per stack its
-/// identity and ordered segments with their anchor commits — no per-commit
-/// materialization. Computed eagerly at construction; commit-level questions walk the
-/// carried graph between a segment's [`tip`](Segment::tip) and
-/// [`boundary`](Segment::boundary).
+/// identity and ordered segments, each carrying the commit ids it claimed. Computed
+/// eagerly at construction; extent questions are reads of [`commits`](Segment::commits),
+/// not walks.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SegmentGraph {
     /// The stacks, in workspace (parent) order.

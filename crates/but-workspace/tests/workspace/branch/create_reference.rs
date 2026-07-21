@@ -3312,9 +3312,8 @@ fn create_reference_no_anchor_for_existing_below_base_branch_is_not_a_noop() -> 
         stack_id_for_name,
         None,
     );
-    match outcome {
-        Ok(None) => panic!("must not be treated as already-present (silent no-op)"),
-        Ok(Some(_)) | Err(_) => {}
+    if let Ok(None) = outcome {
+        panic!("must not be treated as already-present (silent no-op)");
     }
     Ok(())
 }

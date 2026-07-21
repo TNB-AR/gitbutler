@@ -51,20 +51,24 @@ pub enum SquashOutcome {
 
 impl CliOutputHuman for SquashOutcome {
     fn on_human(self, out: &mut dyn WriteWithUtils, _theme: &Theme) -> anyhow::Result<()> {
+        // GB-1771 missing change ID here
         match self {
             SquashOutcome::Commits {
                 sources,
                 target,
                 new_commit,
             } => {
-                let sources = sources.into_iter().map(theme::Commit).join(", ");
+                let sources = sources
+                    .into_iter()
+                    .map(|id| theme::Commit(id, None))
+                    .join(", ");
 
                 writeln!(
                     out,
                     "Squashed {} into {} to create {}",
                     sources,
-                    theme::Commit(target),
-                    theme::Commit(new_commit)
+                    theme::Commit(target, None),
+                    theme::Commit(new_commit, None)
                 )?;
             }
             SquashOutcome::Branch {
@@ -76,7 +80,7 @@ impl CliOutputHuman for SquashOutcome {
                         out,
                         "Squashed branch {} to create commit {}",
                         theme::Branch(&branch_names[0]),
-                        theme::Commit(new_commit)
+                        theme::Commit(new_commit, None)
                     )?;
                 } else {
                     let branch_names = branch_names.into_iter().map(theme::Branch).join(", ");
@@ -84,7 +88,7 @@ impl CliOutputHuman for SquashOutcome {
                         out,
                         "Squashed branches {} to create commit {}",
                         branch_names,
-                        theme::Commit(new_commit)
+                        theme::Commit(new_commit, None)
                     )?;
                 }
             }
@@ -92,16 +96,19 @@ impl CliOutputHuman for SquashOutcome {
                 writeln!(
                     out,
                     "Amended {} to create {}",
-                    theme::Commit(target),
-                    theme::Commit(new_commit)
+                    theme::Commit(target, None),
+                    theme::Commit(new_commit, None)
                 )?;
             }
             SquashOutcome::Uncommit { sources } => {
-                let commits = sources.into_iter().map(theme::Commit).join(", ");
+                let commits = sources
+                    .into_iter()
+                    .map(|id| theme::Commit(id, None))
+                    .join(", ");
                 writeln!(out, "Uncommitted {commits}")?;
             }
             SquashOutcome::UncommitHunk { source } => {
-                writeln!(out, "Uncommitted from {}", theme::Commit(source))?;
+                writeln!(out, "Uncommitted from {}", theme::Commit(source, None))?;
             }
         };
 
@@ -450,7 +457,7 @@ fn resolve_target(
         )
         .with_hint(|| hint.clone())?
     {
-        ResolvedCliIdArg::Commit(object_id) => {
+        ResolvedCliIdArg::Commit(object_id, _change_id) => {
             let reword =
                 resolve_reword(message, no_message, use_target_message, use_source_message);
             Ok(SquashTarget::Commit {
@@ -682,7 +689,7 @@ struct CommittedFile {
 impl Squashable {
     fn try_from_resolved_id(id: ResolvedCliIdArg) -> CliResult<Self> {
         let kind = match id {
-            ResolvedCliIdArg::Commit(commit) => return Ok(Self::Commit(commit)),
+            ResolvedCliIdArg::Commit(commit, _change_id) => return Ok(Self::Commit(commit)),
             ResolvedCliIdArg::Branch(branch) => return Ok(Self::Branch(branch)),
             ResolvedCliIdArg::UncommittedHunkOrFile(hunk) => {
                 return Ok(Self::UncommittedHunkOrFile(hunk));

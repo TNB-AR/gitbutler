@@ -248,10 +248,10 @@ pub mod merge {
         /// Fold the tips left to right into one tree, enforcing the lowest merge-base by carrying
         /// the previous iteration's base forward. A conflicting tip is skipped; a conflicting HERO
         /// tip instead skips its nearest merged predecessor and restarts, since the hero must land.
-        /// Once the hero merges after skips, [`schedule_merge_trials_after_hero`] re-arms the
+        /// Once the hero merges after skips, `schedule_merge_trials_after_hero` re-arms the
         /// not-yet-proven skips as trials, the fold restarts once more, and each trial is settled
-        /// by [`resolve_merge_trial`] — so only tips that truly conflict with the hero stay out.
-        /// [`conclude_tips_merge`] partitions the verdicts and writes the merge commit.
+        /// by `resolve_merge_trial` — so only tips that truly conflict with the hero stay out.
+        /// `conclude_tips_merge` partitions the verdicts and writes the merge commit.
         pub fn from_new_merge_with_tips(
             tips: impl IntoIterator<Item = Seed>,
             workspace: &but_graph::Workspace,

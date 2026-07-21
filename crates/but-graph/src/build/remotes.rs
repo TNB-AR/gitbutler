@@ -180,7 +180,6 @@ pub(crate) fn remote_tracking_from_repository(
         if let Some(Ok(rt)) =
             repo.branch_remote_tracking_ref_name(local.as_ref(), gix::remote::Direction::Fetch)
         {
-            let rt = rt.into_owned();
             // The walk also traverses the remotes of git-configured tracking branches — their remote
             // names join the eligibility set. Read the configured name (never split the tracking
             // ref at a slash — remote names may contain slashes).

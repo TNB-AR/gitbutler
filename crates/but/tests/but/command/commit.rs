@@ -115,7 +115,7 @@ Note: 1 change could not be applied:
   first
     line 1 depends on foo ([..])
 
-Hint: you can stack bar on top of foo to apply these changes:
+Hint: to apply these changes, stack bar on top of foo and commit them again — commits already on the branch move with it:
   but move bar foo
 
 "#]]);
@@ -1360,6 +1360,76 @@ Error: Invalid file ID(s):
 }
 
 #[test]
+fn commit_of_adjacent_insertion_to_independent_branch_names_the_dependency() -> anyhow::Result<()> {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("one-stack");
+    env.setup_metadata(&["A"]);
+
+    // The base owns file `M`. Branch A INSERTS a line…
+    env.file("M", "line one\nline two\nline three\n");
+    env.but("commit A -m 'baseline M' --changes M")
+        .assert()
+        .success();
+    env.file("M", "line one\ninserted by A\nline two\nline three\n");
+    env.but("commit A -m 'insert a line' --changes M")
+        .assert()
+        .success();
+
+    // …and the worktree inserts another line right next to it. Pure adjacent
+    // insertions do not intersect as hunk ranges, so no dependency lock is
+    // detected — but the two insertions still conflict when the workspace
+    // re-merges, so the change is rejected. The rejection report must name
+    // the conflicting branch and the stacking recovery, not just a vague
+    // reason.
+    env.file(
+        "M",
+        "line one\ninserted by A\ninserted in worktree\nline two\nline three\n",
+    );
+    env.but("commit api -c -m 'insert another line' --changes M")
+        .assert()
+        .success()
+        .stdout_eq(str![[r#"
+Created new independent branch 'api'
+✓ Created commit 1 on branch api
+Note: 1 change could not be applied:
+  M
+    conflicts with commits on A (edits touch the same file)
+
+Hint: to apply these changes, stack api on top of A and commit them again — commits already on the branch move with it:
+  but move api A
+
+"#]]);
+
+    Ok(())
+}
+
+#[test]
+fn commit_with_filename_shadowed_by_branch_of_same_name_succeeds() -> anyhow::Result<()> {
+    let env = Sandbox::init_scenario_with_target_and_default_settings("one-stack");
+    env.setup_metadata(&["A"]);
+    env.but("branch new notes.txt").assert().success();
+
+    // A dirty file sharing its name with a branch: in the full namespace the
+    // selector would be ambiguous, but `--changes` only takes uncommitted
+    // files, so the filename must keep working.
+    env.file("notes.txt", "content\n");
+
+    env.but("commit A -m 'notes' --changes notes.txt")
+        .assert()
+        .success();
+
+    let status = util::status_json(&env).expect("status should be valid JSON");
+    let remaining = status["uncommittedChanges"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or_default();
+    assert_eq!(remaining, 0, "the file should be committed");
+    let messages = branch_commit_messages(&env, "A");
+    assert_eq!(messages[..1], ["notes"]);
+
+    Ok(())
+}
+
+#[test]
 fn commit_with_file_assigned_to_different_stack_fails() -> anyhow::Result<()> {
     let env = Sandbox::init_scenario_with_target_and_default_settings("two-stacks");
     env.setup_metadata(&["A", "B"]);
@@ -1569,9 +1639,9 @@ fn can_overspecify_hunk_id() {
         .success()
         // Full ID is qs:3c81ccd4449094b2becf2b846fc69cfdfcaa613c
         .stdout_eq(str![[r#"
-────────╮
-q:3 file│
-────────╯
+─────────╮
+qs:3 file│
+─────────╯
      1│+hello
 
 "#]]);
@@ -1648,9 +1718,9 @@ hellooooo
     );
 
     env.but("diff").assert().success().stdout_eq(str![[r#"
-─────────╮
-q:79 file│
-─────────╯
+──────────╮
+qs:79 file│
+──────────╯
    2 2│ 1
    3 3│ 2
    4 4│ 3
@@ -1658,9 +1728,9 @@ q:79 file│
    5 6│ 4
    6 7│ 5
    7 8│ 6
-─────────╮
-q:78 file│
-─────────╯
+──────────╮
+qs:78 file│
+──────────╯
     9 10│ 1
    10 11│ 2
    11 12│ 3

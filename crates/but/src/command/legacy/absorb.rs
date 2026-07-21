@@ -1,5 +1,5 @@
 use crate::theme::{self, Paint};
-use but_core::{RepositoryExt, sync::RepoExclusive};
+use but_core::sync::RepoExclusive;
 use but_ctx::Context;
 use but_hunk_assignment::{
     AbsorptionTarget, CommitAbsorption, HunkAssignment, JsonAbsorbOutput, JsonCommitAbsorption,
@@ -39,13 +39,33 @@ pub(crate) fn handle(
     let mut guard = ctx.exclusive_worktree_access();
     let id_map = IdMap::new_from_context(ctx, None, guard.read_permission())?;
     let source: Option<CliId> = source
-        .and_then(|s| parse_sources(ctx, &id_map, s).ok())
-        .and_then(|s| {
-            s.into_iter().find(|s| {
-                matches!(s, CliId::UncommittedHunkOrFile { .. })
-                    || matches!(s, CliId::Branch { .. })
-            })
-        });
+        .map(|s| -> anyhow::Result<CliId> {
+            // Uncommitted selectors resolve in the uncommitted namespace first
+            // so later commits cannot shadow them; branch selectors resolve in
+            // the full namespace. A selector that names neither is an error —
+            // silently falling back to absorbing everything is never intended.
+            let resolved =
+                match crate::id::parser::resolve_uncommitted_part(ctx, &id_map, s) {
+                    Ok(ids) if !ids.is_empty() => ids,
+                    _ => parse_sources(ctx, &id_map, s)?,
+                };
+            let mut acceptable = resolved.into_iter().filter(|id| {
+                matches!(id, CliId::UncommittedHunkOrFile { .. })
+                    || matches!(id, CliId::Branch { .. })
+            });
+            let first = acceptable.next().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "'{s}' does not name an uncommitted change or branch; refusing to absorb everything"
+                )
+            })?;
+            if acceptable.next().is_some() {
+                anyhow::bail!(
+                    "'{s}' is ambiguous - it matches more than one uncommitted change. Use more characters to disambiguate."
+                );
+            }
+            Ok(first)
+        })
+        .transpose()?;
 
     let target = if let Some(source) = source {
         match source {
@@ -80,10 +100,7 @@ pub(crate) fn handle(
     // Display the plan (in JSON mode for non-dry-run, collect without writing — we'll
     // combine it with the result in absorb_assignments to avoid a double-write that
     // would overwrite the plan in the JSON buffer).
-    let plan_json = {
-        let repo = ctx.repo.get()?.clone().for_commit_shortening();
-        display_absorption_plan(&absorption_plan, &id_map, &repo, out, dry_run)?
-    };
+    let plan_json = display_absorption_plan(&absorption_plan, &id_map, out, dry_run)?;
 
     if dry_run {
         // Nothing more to do
@@ -198,7 +215,6 @@ fn get_hunk_ranges(assignment: &HunkAssignment) -> Vec<String> {
 fn display_absorption_plan(
     commit_absorptions: &[CommitAbsorption],
     id_map: &IdMap,
-    repo: &gix::Repository,
     out: &mut OutputChannel,
     write_json: bool,
 ) -> anyhow::Result<Option<JsonAbsorbOutput>> {
@@ -273,7 +289,12 @@ fn display_absorption_plan(
             writeln!(
                 out,
                 "Absorbed to commit: {} {}",
-                theme::CommitRef(id_map, repo, absorption.commit_id),
+                theme::Commit(
+                    absorption.commit_id,
+                    id_map
+                        .change_id_ref(absorption.commit_id)
+                        .map(|change_id| change_id.change_id.clone()),
+                ),
                 absorption.commit_summary
             )?;
             writeln!(out, "  ({})", t.hint.paint(absorption.reason.description()))?;

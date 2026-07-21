@@ -25,7 +25,7 @@ use gix::refs::transaction::PreviousValue;
 ///
 /// Return the updated substrate that reflects this change, or `None` if nothing changed.
 /// Display callers materialize via
-/// [`into_display`](but_graph::Workspace::into_display).
+/// [`display_stacks`](but_graph::Workspace::display_stacks).
 pub fn remove_reference(
     ref_name: &gix::refs::FullNameRef,
     repo: &gix::Repository,

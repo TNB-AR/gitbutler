@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use anyhow::Context;
 use bstr::BStr;
 use but_core::{RefMetadata, extract_remote_name_and_short_name};
@@ -126,7 +124,7 @@ impl Workspace {
                 .ctx
                 .symbolic_remote_names
                 .iter()
-                .map(|name| Cow::Borrowed(name.as_str().into()))
+                .map(|name| name.as_str().into())
                 .collect();
             extract_remote_name_and_short_name(tr.ref_name.as_ref(), &remote_names)
                 .map(|(remote_name, _)| remote_name)
@@ -177,8 +175,8 @@ impl Workspace {
         // A frame FACT, not a derivation: the entrypoint marks are gated on exactly this
         // condition (`mark_entrypoint_segments`), verified equivalent across the suites
         // (249 probes, both branches). The tripwire below keeps debug builds honest.
-        let fact = !(self.frame.entry_inside && self.frame.kind.has_managed_ref());
-        fact
+
+        !(self.frame.entry_inside && self.frame.kind.has_managed_ref())
     }
 
     /// The `(stack_idx, segment_idx)` of the entry segment in the SEGMENT GRAPH, located from the
@@ -202,7 +200,7 @@ impl Workspace {
     }
 
     /// Whether the entry "marks" the segment-graph stack at `stack_idx`, replicating the display
-    /// marker's exact semantics ([`mark_entrypoint_segments`](super::init)): nothing marks
+    /// marker's exact semantics (`mark_entrypoint_segments`): nothing marks
     /// unless the mark gate holds (entry inside a managed workspace); a name match anywhere
     /// restricts marking to name matches; otherwise the entry's resolved commit marks every
     /// stack containing it.
@@ -251,7 +249,8 @@ impl Workspace {
             // The entry segment is located from the FRAME facts over the SEGMENT GRAPH; the
             // display-flavored entrypoint marks are not consulted (the tripwire keeps
             // debug builds honest).
-            let reachable = self.entry_location().is_some_and(|(stack_idx, idx)| {
+
+            self.entry_location().is_some_and(|(stack_idx, idx)| {
                 self.segment_graph
                     .stacks
                     .get(stack_idx)
@@ -262,8 +261,7 @@ impl Workspace {
                             .into_iter()
                             .any(|segments| segments.iter().any(|s| s.ref_name() == Some(name)))
                     })
-            });
-            reachable
+            })
         }
     }
 

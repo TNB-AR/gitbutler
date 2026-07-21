@@ -83,6 +83,29 @@ fn unborn() {
         .assert()
         .failure()
         .stderr_eq(snapbox::str![[r#"
+Error: No target branch is configured and none could be inferred. Run `but config target <remote>/<branch>` to configure one.
+
+"#]]);
+}
+
+#[cfg(feature = "legacy")]
+#[test]
+fn disabled_single_branch_mode_requires_setup_for_unregistered_repository() {
+    let env = Sandbox::open_with_default_settings("one-fork");
+    env.but("config feature single-branch disable")
+        .assert()
+        .success()
+        .stderr_eq(snapbox::str![])
+        .stdout_eq(snapbox::str![[r#"
+✓ Feature flag single-branch is now disabled
+
+"#]]);
+
+    env.but("status")
+        .assert()
+        .failure()
+        .stdout_eq(snapbox::str![])
+        .stderr_eq(snapbox::str![[r#"
 Error: Setup required: No GitButler project found at . - run `but setup` to configure the project
 
 "#]]);
@@ -104,7 +127,7 @@ fn first_commit_no_workspace() {
         .assert()
         .failure()
         .stderr_eq(snapbox::str![[r#"
-Error: Setup required: No GitButler project found at . - run `but setup` to configure the project
+Error: No target branch is configured and none could be inferred. Run `but config target <remote>/<branch>` to configure one.
 
 "#]]);
 }
@@ -147,7 +170,7 @@ fn json_shows_paths_as_strings() {
 {
   "uncommittedChanges": [
     {
-      "cliId": "q",
+      "cliId": "qu",
       "filePath": "test-file.txt",
       "changeType": "added"
     }
@@ -270,12 +293,12 @@ fn uncommitted_and_committed_file_cli_ids() -> anyhow::Result<()> {
 {
   "uncommittedChanges": [
     {
-      "cliId": "n",
+      "cliId": "nk",
       "filePath": "a.txt",
       "changeType": "modified"
     },
     {
-      "cliId": "p",
+      "cliId": "pn",
       "filePath": "b.txt",
       "changeType": "modified"
     }
@@ -579,12 +602,12 @@ fn status_upstream_and_merge_base_messages_truncate_when_unpaged() {
 ┊●   lvx add A
 ├╯
 ┊
-┊╭┄(upstream) ⏫ 1 commit
+┊╭┄(upstream: origin/main) 1 new commit
 ┊● 67247ca add upstream-commit-message-that-is-intentionally-very-very-long-to-exc…
 ┊┊
 ├╯ 9fd740d (common base) 2000-01-02 add merge-base-message-that-is-intentio…
 
-Hint: run `but help` for all commands
+Hint: origin/main moved ahead; run `but pull` to update the workspace
 
 "#]]);
 }
@@ -628,9 +651,10 @@ fn status_marks_merged_upstream_without_upstream_flag() {
 ┊●   kyl B-change
 ├╯
 ┊
-┊● 9354ac4 (upstream) ⏫ 2 commits
+┊● 9354ac4 (upstream: origin/main) 2 new commits
 ├╯ efc9211 (common base) 2000-01-02 base
 
+Hint: origin/main moved ahead; run `but pull` to update the workspace
 Hint: branches marked `(merged upstream)` have landed; run `but pull` to remove them, or start new work on another branch
 
 "#]]);
@@ -744,9 +768,10 @@ fn unmerged_empty_branch_above_merged_one_is_not_treated_as_merged() {
 ┊├┄bo [bottom] (merged upstream) (no commits)
 ├╯
 ┊
-┊● 334227d (upstream) ⏫ 1 commit
+┊● 334227d (upstream: origin/main) 1 new commit
 ├╯ 334227d (common base) 2000-01-02 merge bottom
 
+Hint: origin/main moved ahead; run `but pull` to update the workspace
 Hint: branches marked `(merged upstream)` have landed; run `but pull` to remove them, or start new work on another branch
 
 "#]]);
@@ -907,12 +932,13 @@ fn status_upstream_prunes_untracked_integrated_branch() {
 ┊●   kyl B-change
 ├╯
 ┊
-┊╭┄(upstream) ⏫ 2 commits
+┊╭┄(upstream: origin/main) 2 new commits
 ┊● 9354ac4 main-advance
 ┊● 756ee31 A-change
 ┊┊
 ├╯ efc9211 (common base) 2000-01-02 base
 
+Hint: origin/main moved ahead; run `but pull` to update the workspace
 Hint: branches marked `(merged upstream)` have landed; run `but pull` to remove them, or start new work on another branch
 
 "#]]);
@@ -952,12 +978,13 @@ fn status_upstream_prunes_metadata_tracked_integrated_branches() {
 ┊╭┄ex [extra-untracked] ○ empty (no commits)
 ├╯
 ┊
-┊╭┄(upstream) ⏫ 2 commits
+┊╭┄(upstream: origin/main) 2 new commits
 ┊● 9354ac4 main-advance
 ┊● 756ee31 A-change
 ┊┊
 ├╯ efc9211 (common base) 2000-01-02 base
 
+Hint: origin/main moved ahead; run `but pull` to update the workspace
 Hint: branches marked `(merged upstream)` have landed; run `but pull` to remove them, or start new work on another branch
 
 "#]]);
@@ -1003,12 +1030,13 @@ fn status_upstream_prunes_with_different_bases() {
 ┊●   tpp M1
 ├╯
 ┊
-┊╭┄(upstream) ⏫ 2 commits
+┊╭┄(upstream: origin/main) 2 new commits
 ┊● ba5149e M2
 ┊● 6daac93 M1
 ┊┊
 ├╯ efc9211 (common base) 2000-01-02 base
 
+Hint: origin/main moved ahead; run `but pull` to update the workspace
 Hint: branches marked `(merged upstream)` have landed; run `but pull` to remove them, or start new work on another branch
 
 "#]]);
@@ -1171,8 +1199,7 @@ This notice repeats until the skill is installed. If it still appears after inst
 ┴ 0dc3733 (common base) 2000-01-02 add M
 
 Hint: ◐ means rewritten locally vs upstream.
-Hint: the first token on each line is the ID to use in commands.
-Hint: run `but help` for all commands
+Hint: commits are listed newest first. The first token on each line is the ID to use in commands.
 
 "#]]);
 
@@ -1190,8 +1217,7 @@ Hint: run `but help` for all commands
 ┴ 0dc3733 (common base) 2000-01-02 add M
 
 Hint: ◐ means rewritten locally vs upstream.
-Hint: the first token on each line is the ID to use in commands.
-Hint: run `but help` for all commands
+Hint: commits are listed newest first. The first token on each line is the ID to use in commands.
 
 "#]]);
 }
@@ -1338,15 +1364,15 @@ fn file_ids_are_nicely_aligned() {
         .success()
         .stdout_eq(snapbox::str![[r#"
 ╭┄zz [uncommitted]
-┊   r  A file-0.txt
-┊   k  A file-1.txt
-┊   t  A file-2.txt
-┊   v  A file-3.txt
+┊   rr A file-0.txt
+┊   kr A file-1.txt
+┊   tp A file-2.txt
+┊   vk A file-3.txt
 ┊   wx A file-4.txt
 ┊   wv A file-5.txt
 ┊   wk A file-6.txt
-┊   x  A file-7.txt
-┊   m  A file-8.txt
+┊   xx A file-7.txt
+┊   mv A file-8.txt
 ┊   zx A file-9.txt
 ┊
 ┴ 0dc3733 (common base) 2000-01-02 add M

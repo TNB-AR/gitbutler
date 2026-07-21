@@ -30,6 +30,7 @@
 use std::{fmt::Display, path::Path, str::FromStr, sync::OnceLock};
 
 use bstr::ByteSlice as _;
+use but_core::ChangeId;
 use colored::{ColoredString, Colorize as _};
 use gix::refs::FullName;
 use ratatui::{
@@ -44,6 +45,10 @@ const MONOKAI_THEME: &[u8] =
     include_bytes!("../assets/syntax-highlighting-themes/Monokai Extended.tmTheme");
 const MONOKAI_THEME_LIGHT: &[u8] =
     include_bytes!("../assets/syntax-highlighting-themes/Monokai Extended Light.tmTheme");
+
+/// The minimum number of change ID characters displayed for a commit, so that
+/// short IDs remain visually distinctive.
+pub(crate) const MIN_DISPLAYED_CHANGE_ID_CHARS: usize = 3;
 
 /// Global theme instance, initialized once at startup.
 static THEME: OnceLock<Theme> = OnceLock::new();
@@ -294,6 +299,7 @@ pub struct Theme {
     pub tui_mode_move: Style,
     pub tui_mode_details: Style,
     pub tui_mark: Style,
+    pub tui_details_context_lines_marked: Style,
 
     // General purpose
     /// Subdued hint text for supplemental information that should not demand attention
@@ -433,6 +439,9 @@ impl Theme {
             tui_mode_move: Style::new().bg(Color::Cyan).fg(Color::Black),
             tui_mode_details: Style::new().bg(Color::Rgb(255, 165, 0)).fg(Color::Black),
             tui_mark: Style::new().bg(Color::Blue).fg(Color::Black),
+            tui_details_context_lines_marked: const {
+                Rgb(30, 30, 45).lerp(Rgb(69, 71, 88), 0.6).into_bg_style()
+            },
 
             // General purpose
             hint: Style::new().add_modifier(Modifier::DIM),
@@ -488,6 +497,11 @@ impl Theme {
             tui_mode_move: dark_t.tui_mode_move.fg(white_256),
             tui_mode_details: dark_t.tui_mode_details.fg(Color::Black),
             tui_mark: dark_t.tui_mark.fg(white_256),
+            tui_details_context_lines_marked: const {
+                Rgb(255, 255, 255)
+                    .lerp(Rgb(69, 71, 88), 0.2)
+                    .into_bg_style()
+            },
 
             // General purpose
             hint: style_fg(Color::DarkGray),
@@ -521,6 +535,8 @@ pub struct ThemeSymbols {
     pub lightning: StyledSymbol,
     /// Line marked in TUI
     pub mark: StyledSymbol,
+    /// Line partially marked in TUI
+    pub partial_mark: StyledSymbol,
 }
 
 impl ThemeSymbols {
@@ -533,6 +549,7 @@ impl ThemeSymbols {
             arrow: StyledSymbol::new("→", t.hint),
             lightning: StyledSymbol::new("⚡", t.attention.add_modifier(Modifier::BOLD)),
             mark: StyledSymbol::new("✔︎", t.tui_mark),
+            partial_mark: StyledSymbol::new("—", t.tui_mark),
         }
     }
 }
@@ -541,52 +558,49 @@ impl ThemeSymbols {
 /// Ratatui [`Span`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyledSymbol {
-    content: String,
+    content: &'static str,
     style: Style,
 }
 
 impl StyledSymbol {
     /// Create a new [`StyledSymbol`].
-    pub fn new<S: AsRef<str>>(content: S, style: Style) -> Self {
-        StyledSymbol {
-            content: content.as_ref().to_string(),
-            style,
-        }
+    pub fn new(content: &'static str, style: Style) -> Self {
+        StyledSymbol { content, style }
     }
 
     /// Convert the [`StyledSymbol`] into a styled [`Span`].
     pub fn span(&self) -> Span<'_> {
-        Span::styled(&self.content, self.style)
+        Span::styled(self.content, self.style)
     }
 
     /// Return a new symbol styled for success.
     pub fn success(&self) -> StyledSymbol {
         let t = get();
-        StyledSymbol::new(&self.content, t.success.add_modifier(Modifier::BOLD))
+        StyledSymbol::new(self.content, t.success.add_modifier(Modifier::BOLD))
     }
 
     /// Return a new symbol styled for attention / warning.
     pub fn attention(&self) -> StyledSymbol {
         let t = get();
-        StyledSymbol::new(&self.content, t.attention.add_modifier(Modifier::BOLD))
+        StyledSymbol::new(self.content, t.attention.add_modifier(Modifier::BOLD))
     }
 
     /// Return a new symbol styled for error.
     pub fn error(&self) -> StyledSymbol {
         let t = get();
-        StyledSymbol::new(&self.content, t.error.add_modifier(Modifier::BOLD))
+        StyledSymbol::new(self.content, t.error.add_modifier(Modifier::BOLD))
     }
 
     /// Return a new symbol styled for info.
     pub fn info(&self) -> StyledSymbol {
         let t = get();
-        StyledSymbol::new(&self.content, t.info.add_modifier(Modifier::BOLD))
+        StyledSymbol::new(self.content, t.info.add_modifier(Modifier::BOLD))
     }
 }
 
 impl Display for StyledSymbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.style.paint(&self.content))
+        write!(f, "{}", self.style.paint(self.content))
     }
 }
 
@@ -616,127 +630,25 @@ where
     }
 }
 
-pub struct Commit(pub gix::ObjectId);
+pub struct Commit(pub gix::ObjectId, pub Option<ChangeId>);
 
 impl Display for Commit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let t = get();
-        write!(
-            f,
-            "{}",
-            t.commit_id.paint(self.0.to_hex_with_len(7).to_string())
-        )
-    }
-}
 
-/// A commit rendered the way `but status` identifies it: by its disambiguated
-/// short change ID, falling back to the short sha for commits without one.
-pub struct CommitRef<'a>(
-    pub &'a crate::IdMap,
-    pub &'a gix::Repository,
-    pub gix::ObjectId,
-);
-
-impl Display for CommitRef<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let CommitRef(id_map, repo, commit_id) = self;
-        let t = get();
-        match id_map.change_id_ref(*commit_id) {
-            Some(change_id) => {
-                // Like status: minimal unique prefix in the change-id style,
-                // the padding in the hint style.
-                let padded = change_id.padded_short_id();
-                let (id, hint) = padded.split_at(change_id.short_id.len());
-                write!(f, "{}{}", t.change_id.paint(id), t.hint.paint(hint))
-            }
-            None => write!(
+        if let Some(change_id) = &self.1 {
+            let s = change_id
+                .get(..MIN_DISPLAYED_CHANGE_ID_CHARS.min(change_id.len()))
+                .unwrap_or_default();
+            write!(f, "{}", t.change_id.paint(s.to_str_lossy()))
+        } else {
+            write!(
                 f,
                 "{}",
-                t.cli_id
-                    .paint(crate::utils::shorten_object_id(repo, *commit_id))
-            ),
+                t.commit_id.paint(self.0.to_hex_with_len(7).to_string())
+            )
         }
     }
-}
-
-/// Render a [`CommitRef`] for a commit that a mutation just created, resolved
-/// against a freshly built [`crate::IdMap`] so the ID matches what the next
-/// `but status` displays (see [`crate::IdMap::change_id_ref`] for why a stale
-/// map must not be used). Renders "no commit was created" (`None`) as the
-/// empty string.
-///
-/// Building the map is not free — it diffs the worktree and persists the
-/// reconciled hunk assignments — so render each created commit only once.
-pub fn new_commit_ref_with_perm(
-    ctx: &but_ctx::Context,
-    perm: &but_core::sync::RepoShared,
-    commit_id: impl Into<Option<gix::ObjectId>>,
-) -> anyhow::Result<String> {
-    let Some(commit_id) = commit_id.into() else {
-        return Ok(String::new());
-    };
-    let mut refs = new_commit_refs_with_perm(ctx, perm, &[commit_id])?;
-    Ok(refs.pop().expect("one ref per commit id"))
-}
-
-/// Paint a commit ref from precomputed parts: the stable change-ID ref when
-/// the commit has one, its short sha otherwise.
-pub fn commit_display_ref(cli_id: Option<&str>, short_sha: &str) -> String {
-    let t = get();
-    match cli_id {
-        Some(cli_id) => t.change_id.paint(cli_id).to_string(),
-        None => t.cli_id.paint(short_sha).to_string(),
-    }
-}
-
-/// Like [`new_commit_ref_with_perm`], for messages that mention several
-/// commits: all refs render from one freshly built [`crate::IdMap`].
-pub fn new_commit_refs_with_perm(
-    ctx: &but_ctx::Context,
-    perm: &but_core::sync::RepoShared,
-    commit_ids: &[gix::ObjectId],
-) -> anyhow::Result<Vec<String>> {
-    if commit_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let repo = ctx.repo.get()?;
-    // The mutation has already succeeded when this renders its result, so a
-    // failure to build the map must not fail the command — an agent would
-    // retry a mutation that already happened. Degrade to the sha instead.
-    match crate::IdMap::new_from_context(ctx, None, perm) {
-        Ok(id_map) => Ok(commit_ids
-            .iter()
-            .map(|commit_id| CommitRef(&id_map, &repo, *commit_id).to_string())
-            .collect()),
-        Err(err) => {
-            tracing::warn!(
-                ?err,
-                "could not build an IdMap to identify the resulting commits"
-            );
-            Ok(commit_ids
-                .iter()
-                .map(|commit_id| {
-                    get()
-                        .cli_id
-                        .paint(crate::utils::shorten_object_id(&repo, *commit_id))
-                        .to_string()
-                })
-                .collect())
-        }
-    }
-}
-
-/// Like [`new_commit_ref_with_perm`], for callers that hold no worktree lock.
-///
-/// When several operations run in sequence, an earlier operation's commit may
-/// be rewritten by a later one, so render each ref right after its operation
-/// completes rather than from one map built at the end.
-pub fn new_commit_ref(
-    ctx: &but_ctx::Context,
-    commit_id: impl Into<Option<gix::ObjectId>>,
-) -> anyhow::Result<String> {
-    let guard = ctx.shared_worktree_access();
-    new_commit_ref_with_perm(ctx, guard.read_permission(), commit_id)
 }
 
 pub struct Branch<T>(pub T);
@@ -755,6 +667,27 @@ impl Display for Branch<&FullName> {
             "'{}'",
             t.local_branch.paint(self.0.shorten().to_str_lossy())
         )
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct Rgb(pub u8, pub u8, pub u8);
+
+impl Rgb {
+    pub const fn lerp(self, rhs: Rgb, weight: f32) -> Rgb {
+        const fn lerp_channel(lhs: u8, rhs: u8, weight: f32) -> u8 {
+            (lhs as f32 + (rhs as f32 - lhs as f32) * weight).round() as u8
+        }
+
+        Rgb(
+            lerp_channel(self.0, rhs.0, weight),
+            lerp_channel(self.1, rhs.1, weight),
+            lerp_channel(self.2, rhs.2, weight),
+        )
+    }
+
+    pub const fn into_bg_style(self) -> Style {
+        Style::new().bg(Color::Rgb(self.0, self.1, self.2))
     }
 }
 

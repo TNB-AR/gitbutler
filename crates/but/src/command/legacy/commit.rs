@@ -19,12 +19,14 @@ use crate::{
     CliId, CliResult, IdMap,
     args::atoms::{BranchArg, BranchOrCommit, CliIdArg, Priority, Purpose, ResolvedCliIdArg},
     bad_input,
-    command::legacy::commit_message_prep::normalize_commit_message,
-    command::legacy::status::assignment::{CLIHunkAssignment, FileAssignment},
+    command::legacy::{
+        commit_message_prep::normalize_commit_message,
+        status::assignment::{CLIHunkAssignment, FileAssignment},
+    },
     legacy::workspace::{HeadInfoBranch, HeadInfoStack},
     theme::{self, Paint},
     tui,
-    utils::{InputOutputChannel, OutputChannel, diff_specs, rejection},
+    utils::{InputOutputChannel, OutputChannel, diff_specs, get_change_id_for_commit, rejection},
 };
 
 type TargetStack = (StackId, HeadInfoStack);
@@ -251,10 +253,19 @@ fn resolve_file_ids(
     let mut errors = Vec::new();
 
     for file_id in file_ids {
-        let cli_ids = match id_map.parse_using_context(file_id, ctx) {
+        // Resolve in the uncommitted namespace (with the shared full-namespace
+        // fallback for container selectors), so a commit or branch ID minted
+        // after the file ID was printed cannot shadow it.
+        let cli_ids = match crate::id::parser::resolve_uncommitted_part(ctx, id_map, file_id) {
             Ok(ids) => ids,
             Err(e) => {
-                errors.push(format!("'{file_id}': {e}"));
+                if e.downcast_ref::<crate::id::parser::IdResolutionError>()
+                    .is_some()
+                {
+                    errors.push(format!("{e}"));
+                } else {
+                    errors.push(format!("'{file_id}': {e}"));
+                }
                 continue;
             }
         };
@@ -649,15 +660,43 @@ pub(crate) fn commit(
         commit_message
     };
 
-    let outcome = commit_create(
+    let outcome = match commit_create(
         ctx,
         relative_to,
         insert_side,
-        diff_specs,
+        diff_specs.clone(),
         final_commit_message,
         DryRun::No,
         guard.write_permission(),
-    )?;
+    ) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            // When the workspace re-merge trips over changes that build on
+            // another branch's commits (adjacent insertions evade hunk-level
+            // lock detection), name the branch and the stacking recovery
+            // instead of surfacing cherry-pick internals. Any other failure
+            // passes through untouched — the marker strings are but-rebase's
+            // two re-merge conflict errors.
+            let remerge_conflict = err.chain().any(|cause| {
+                let cause = cause.to_string();
+                cause.contains("Failed to merge bases while cherry picking")
+                    || cause.contains("merge could not be repeated without conflicts")
+            });
+            let explained = remerge_conflict
+                .then(|| ctx.workspace_and_db_with_perm(guard.read_permission()).ok())
+                .flatten()
+                .and_then(|(repo, ws, _db)| {
+                    rejection::commit_failure_error(&repo, &ws, &diff_specs, &target_branch.name)
+                });
+            return Err(match explained {
+                Some(explained) => {
+                    tracing::debug!(?err, "commit failed; reporting dependency conflict instead");
+                    explained.into()
+                }
+                None => err.into(),
+            });
+        }
+    };
 
     let rejected = if outcome.rejected_specs.is_empty() {
         Vec::new()
@@ -671,12 +710,20 @@ pub(crate) fn commit(
         // projection (or a rejected hunk could resolve to it). This relies on
         // `commit_create` not invalidating the cached workspace.
         let (repo, ws, _db) = ctx.workspace_and_db_with_perm(guard.read_permission())?;
-        rejection::explain_rejections(&repo, &ws, &outcome.rejected_specs)
+        rejection::explain_rejections(
+            &repo,
+            &ws,
+            &outcome.rejected_specs,
+            Some(&target_branch.name),
+        )
     };
 
     if let Some(out) = out.for_human() {
         let commit_ref = match outcome.new_commit {
-            Some(id) => theme::new_commit_ref_with_perm(ctx, guard.read_permission(), id)?,
+            Some(id) => {
+                let repo = ctx.repo.get()?;
+                theme::Commit(id, Some(get_change_id_for_commit(&repo, id)?)).to_string()
+            }
             None => t.commit_id.paint("unknown").to_string(),
         };
         writeln!(

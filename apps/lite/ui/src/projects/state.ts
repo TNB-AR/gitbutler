@@ -42,6 +42,8 @@ export const projectSlice = createSlice({
 	name: "project",
 	initialState,
 	reducers: {
+		setDetailsSelectionScope: withProject(projectReducers.setDetailsSelectionScope),
+		selectUncommittedFiles: withProject(projectReducers.selectUncommittedFiles),
 		selectOutline: withProject(projectReducers.selectOutline),
 		selectFiles: withProject(projectReducers.selectFiles),
 		selectDiff: withProject(projectReducers.selectDiff),
@@ -60,7 +62,6 @@ export const projectSlice = createSlice({
 		checkCommits: withProject(projectReducers.checkCommits),
 		setCheckedCommits: withProject(projectReducers.setCheckedCommits),
 		clearCheckedCommits: withProject(projectReducers.clearCheckedCommits),
-		setCommitTarget: withProject(projectReducers.setCommitTarget),
 		updateRewrittenCommitReferences: withProject(projectReducers.updateRewrittenCommitReferences),
 		toggleFiles: withProject(projectReducers.toggleFiles),
 		setDetailsFullWindow: withProject(projectReducers.setDetailsFullWindow),
@@ -70,8 +71,11 @@ export const projectSlice = createSlice({
 	},
 	selectors: {
 		selectFilesVisible: fromProject(projectSelectors.selectFilesVisible),
+		selectCanShowFiles: fromProject(projectSelectors.selectCanShowFiles),
 		selectDetailsFullWindow: fromProject(projectSelectors.selectDetailsFullWindow),
+		selectDetailsSelectionScope: fromProject(projectSelectors.selectDetailsSelectionScope),
 		selectDialogState: fromProject(projectSelectors.selectDialogState),
+		selectSelectionUncommittedFiles: fromProject(projectSelectors.selectSelectionUncommittedFiles),
 		selectIsSelectedOutline: fromProject(projectSelectors.selectIsSelectedOutline),
 		selectSelectionOutline: fromProject(projectSelectors.selectSelectionOutline),
 		selectSelectionFiles: fromProject(projectSelectors.selectSelectionFiles),
@@ -83,6 +87,5 @@ export const projectSlice = createSlice({
 		selectCheckedCommitOperands: fromProject(projectSelectors.selectCheckedCommitOperands),
 		selectCheckedCommitCount: fromProject(projectSelectors.selectCheckedCommitCount),
 		selectHasCheckedCommits: fromProject(projectSelectors.selectHasCheckedCommits),
-		selectCommitTarget: fromProject(projectSelectors.selectCommitTarget),
 	},
 });

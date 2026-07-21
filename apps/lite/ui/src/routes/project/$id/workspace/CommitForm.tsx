@@ -1,7 +1,6 @@
 import uiStyles from "#ui/components/ui.module.css";
 import { useCommitAmend, useCommitCreate } from "#ui/api/mutations.ts";
 import { changesInWorktreeQueryOptions, headInfoQueryOptions } from "#ui/api/queries.ts";
-import { relativeToEquals, relativeToKey } from "#ui/api/relative-to.ts";
 import { getHeadInfoIndex, resolveRelativeTo } from "#ui/api/ref-info.ts";
 import { getButtonClassName } from "#ui/components/Button.tsx";
 import { classes } from "#ui/components/classes.ts";
@@ -14,11 +13,11 @@ import {
 	toElectronAccelerator,
 } from "#ui/hotkeys.ts";
 import { nativeMenuItem, showNativeMenuFromTrigger, type NativeMenuItem } from "#ui/native-menu.ts";
+import { operandEquals, operandIdentityKey, type Operand } from "#ui/operands.ts";
 import { projectSlice } from "#ui/projects/state.ts";
 import { focusSelectionScope } from "#ui/selection-scopes.ts";
 import { useAppDispatch, useAppSelector } from "#ui/store.ts";
-import { Button, Tooltip } from "@base-ui/react";
-import { Combobox } from "@base-ui/react/combobox";
+import { Button, Combobox, Tooltip } from "@base-ui/react";
 import type { RelativeTo } from "@gitbutler/but-sdk";
 import { useHotkey, useHotkeys } from "@tanstack/react-hotkeys";
 import { useQuery } from "@tanstack/react-query";
@@ -27,6 +26,7 @@ import styles from "./CommitForm.module.css";
 
 export type CommitTargetComboboxItem = {
 	label: string;
+	operand: Extract<Operand, { _tag: "Branch" | "Commit" }>;
 	relativeTo: RelativeTo;
 };
 
@@ -46,7 +46,7 @@ const CommitTargetComboboxPopup: FC = () => (
 		<Combobox.List className={styles.targetList}>
 			{(item: CommitTargetComboboxItem) => (
 				<Combobox.Item
-					key={relativeToKey(item.relativeTo)}
+					key={operandIdentityKey(item.operand)}
 					value={item}
 					className={styles.targetItem}
 				>
@@ -95,12 +95,8 @@ export const CommitForm: FC<{
 	const [open, setOpen] = useState(false);
 
 	const selectBranch = (option: CommitTargetComboboxItem | null) => {
-		dispatch(
-			projectSlice.actions.setCommitTarget({
-				projectId,
-				commitTarget: option?.relativeTo ?? null,
-			}),
-		);
+		if (option)
+			dispatch(projectSlice.actions.selectOutline({ projectId, selection: option.operand }));
 		setOpen(false);
 	};
 
@@ -182,7 +178,7 @@ export const CommitForm: FC<{
 		},
 	]);
 
-	useHotkey("Escape", () => focusSelectionScope("outline"), {
+	useHotkey("Escape", () => focusSelectionScope("uncommitted-files"), {
 		target: commitTextareaRef,
 		conflictBehavior: "allow",
 	});
@@ -212,8 +208,8 @@ export const CommitForm: FC<{
 					value={commitTarget ?? null}
 					onValueChange={selectBranch}
 					itemToStringLabel={(x) => x.label}
-					itemToStringValue={(x) => relativeToKey(x.relativeTo)}
-					isItemEqualToValue={(a, b) => relativeToEquals(a.relativeTo, b.relativeTo)}
+					itemToStringValue={(x) => operandIdentityKey(x.operand)}
+					isItemEqualToValue={(a, b) => operandEquals(a.operand, b.operand)}
 					autoHighlight
 					disabled={!isDefaultMode || isCommitOrAmendPending}
 				>
@@ -225,7 +221,10 @@ export const CommitForm: FC<{
 							// the tooltip. Other props should be passed above.
 							render={<Button focusableWhenDisabled render={<Tooltip.Trigger />} />}
 						>
-							<Icon name="bullseye" size={14} />
+							<Icon
+								name={commitTarget?.operand._tag === "Commit" ? "commit" : "branch"}
+								size={14}
+							/>
 							<span className={styles.targetTriggerLabel}>
 								<Combobox.Value placeholder="Select commit target" />
 							</span>

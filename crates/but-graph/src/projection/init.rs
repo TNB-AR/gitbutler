@@ -515,8 +515,8 @@ impl Workspace {
                 let Some(node) = cg.node(anchor) else {
                     return true;
                 };
-                !(node.flags.contains(crate::CommitFlags::Integrated)
-                    && !node.flags.contains(crate::CommitFlags::InWorkspace))
+                !node.flags.contains(crate::CommitFlags::Integrated)
+                    || node.flags.contains(crate::CommitFlags::InWorkspace)
             });
         }
         stacks.retain(|stack| !stack.segments.is_empty());
@@ -535,7 +535,7 @@ impl Workspace {
         let mut empty_stacks_to_remove = Vec::new();
         for archived_ref_name in archived_stack_branches {
             let Some((stack_idx, segment_idx)) =
-                find_segment_owner_indexes_by_refname(&stacks, archived_ref_name)
+                find_segment_owner_indexes_by_refname(stacks, archived_ref_name)
             else {
                 continue;
             };
@@ -672,7 +672,7 @@ impl Workspace {
                 );
             }
         }
-        let orphan_chain_names = orphan_chain_names(metadata, &stacks);
+        let orphan_chain_names = orphan_chain_names(metadata, stacks);
         for stack in stacks.iter_mut() {
             remove_empty_branches(
                 stack,
@@ -693,7 +693,7 @@ impl Workspace {
     /// whether a commit in the workspace is reachable from a remote, and how.
     fn mark_remote_reachability(
         &self,
-        stacks: &mut Vec<Stack>,
+        stacks: &mut [Stack],
         cg: &crate::CommitGraph,
     ) -> anyhow::Result<()> {
         // The builder records whether it actually LINKED a remote — an ambiguous
@@ -780,7 +780,7 @@ impl Workspace {
     /// - non-integrated commits from upper stack segments that are still on the
     ///   remote (the "branch split" case — a previously combined push left the
     ///   remote pointing at commits that now belong to branch above it).
-    fn add_commits_on_remote(&self, stacks: &mut Vec<Stack>, cg: &crate::CommitGraph) {
+    fn add_commits_on_remote(&self, stacks: &mut [Stack], cg: &crate::CommitGraph) {
         let remote_named_at = remote_naming_positions(cg);
         let naming = naming_positions(cg);
         for stack in stacks.iter_mut() {
@@ -874,7 +874,7 @@ impl Workspace {
 
     /// If there is a single stack and the base happens to be itself (which happens if the stack is directly integrated/inline with the target),
     /// then empty all commits and segment-related metadata.
-    fn truncate_single_stack_to_match_base(&self, stacks: &mut Vec<Stack>) {
+    fn truncate_single_stack_to_match_base(&self, stacks: &mut [Stack]) {
         if stacks.len() != 1 {
             return;
         }

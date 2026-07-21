@@ -54,6 +54,7 @@ import {
 	type SetReviewTemplateParams,
 	type SetTargetRefAndInitProjectParams,
 	type PeelRestoreSnapshotParams,
+	type WorkspaceFetchFromRemotesParams,
 	type WorkspaceIntegrateUpstreamParams,
 	type UpdateReviewFootersParams,
 } from "./ipc.js";
@@ -121,6 +122,8 @@ import {
 	peelRestoreSnapshot,
 	updateReviewFooters,
 	warmCiChecksCache,
+	workspaceFetchFromRemotes,
+	workspaceFetchStatus,
 	workspaceIntegrateUpstream,
 	askpassInit,
 	askpassSubmitPromptResponse,
@@ -132,6 +135,7 @@ import {
 	clipboard,
 	ipcMain,
 	Menu,
+	nativeTheme,
 	net,
 	protocol,
 	session,
@@ -155,6 +159,11 @@ if (!app.isPackaged) app.setName("GitButler Lite Dev");
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDirPath = path.dirname(currentFilePath);
+
+// [ref:lite_default_settings]
+const applyGUISettings = (settings: GUISettings): void => {
+	nativeTheme.themeSource = settings.theme ?? "system";
+};
 
 // Permissions in this array are allowed by default for trusted origins, without prompting the user for input.
 const trustedOriginDefaultPermissions: Array<
@@ -698,6 +707,14 @@ const registerIpcHandlers = (): void => {
 		(_e, { projectId, stackId }: UnapplyStackParams) => unapplyStack(projectId, stackId),
 	);
 	senderValidatingHandle(
+		liteIpcChannels.workspaceFetchFromRemotes,
+		(_e, { projectId, action }: WorkspaceFetchFromRemotesParams) =>
+			workspaceFetchFromRemotes(projectId, action),
+	);
+	senderValidatingHandle(liteIpcChannels.workspaceFetchStatus, (_e, projectId: string) =>
+		workspaceFetchStatus(projectId),
+	);
+	senderValidatingHandle(
 		liteIpcChannels.workspaceIntegrateUpstream,
 		(_e, { projectId, updates, dryRun }: WorkspaceIntegrateUpstreamParams) =>
 			workspaceIntegrateUpstream(projectId, updates, dryRun),
@@ -724,9 +741,10 @@ const registerIpcHandlers = (): void => {
 		WatcherManager.getInstance().stopAllWatchersForShutdown(),
 	);
 	senderValidatingHandle(liteIpcChannels.readGUISettings, (_e) => readSettings());
-	senderValidatingHandle(liteIpcChannels.writeGUISettings, (_e, settings: GUISettings) =>
-		writeSettings(settings),
-	);
+	senderValidatingHandle(liteIpcChannels.writeGUISettings, async (_e, settings: GUISettings) => {
+		applyGUISettings(settings);
+		await writeSettings(settings);
+	});
 };
 
 const createMainWindow = async (): Promise<void> => {
@@ -760,6 +778,7 @@ const createMainWindow = async (): Promise<void> => {
 
 app.enableSandbox(); // forces sandboxing for all renderers, even if they try to launch without
 void app.whenReady().then(async () => {
+	applyGUISettings(await readSettings());
 	await initApplicationNamespace(null);
 	configureAskpass();
 

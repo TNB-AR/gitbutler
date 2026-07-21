@@ -1178,7 +1178,7 @@ fn workspace_state_from_rebase<M: RefMetadata>(
         }
         let outcome = but_workspace::branch::apply(
             branch.name.as_ref(),
-            &workspace,
+            workspace,
             repo,
             materialized.meta,
             but_workspace::branch::apply::Options {

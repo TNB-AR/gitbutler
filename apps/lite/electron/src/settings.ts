@@ -13,6 +13,7 @@ import path from "node:path";
 
 const guiSettingsV1 = type({
 	version: "1",
+	"autoFetchFrequency?": "string",
 	"diffBackground?": "boolean",
 	"diffFontFamily?": "string",
 	"diffFontSize?": "number",
@@ -24,6 +25,7 @@ const guiSettingsV1 = type({
 		"light?": "string",
 		"dark?": "string",
 	},
+	"theme?": "'light' | 'dark' | 'system'",
 });
 
 type LegacyGUISettings = typeof guiSettingsV1.infer;
